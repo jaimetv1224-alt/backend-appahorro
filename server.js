@@ -198,7 +198,22 @@ const PORT = process.env.PORT || 3001; // Puerto para el backend
 const SERVICE_ACCOUNT_FILE = path.resolve(__dirname, 'credentials.json');
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1xWRnnSp5WjveWHvFJFcNO7bCfB1jyADtawmdXPQJtEA'; // ID de tu hoja de cálculo
 
-// Verifica que credentials.json existe antes de inicializar Google Auth
+// Obtener credenciales de Google desde variable de entorno o archivo
+let googleCredentials = null;
+if (process.env.GOOGLE_CREDENTIALS) {
+  try {
+    googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+  } catch (e) {
+    console.error('[ERROR] No se pudo parsear GOOGLE_CREDENTIALS:', e.message);
+  }
+} else if (fs.existsSync(SERVICE_ACCOUNT_FILE)) {
+  try {
+    googleCredentials = JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_FILE, 'utf-8'));
+  } catch (e) {
+    console.error('[ERROR] No se pudo leer credentials.json:', e.message);
+  }
+}
+
 // --- NUEVOS ENDPOINTS: AHORROS Y ACCIONES ---
 // Helper para inicializar Google Sheets API
 let sheets;
@@ -208,7 +223,7 @@ async function getSheetsClient() {
   }
   if (sheets) return sheets;
   const auth = new google.auth.GoogleAuth({
-    keyFile: SERVICE_ACCOUNT_FILE,
+    credentials: googleCredentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
   sheets = google.sheets({ version: 'v4', auth: await auth.getClient() });
@@ -456,15 +471,15 @@ let googleSheetsAvailable = false;
 // Autenticación con Google Sheets usando la cuenta de servicio
 let auth;
 
-if (!fs.existsSync(SERVICE_ACCOUNT_FILE)) {
-    console.warn("[ADVERTENCIA] No se encontró el archivo 'credentials.json'. El servidor funcionará con datos de prueba.");
+if (!googleCredentials) {
+    console.warn("[ADVERTENCIA] No se encontraron credenciales de Google. El servidor funcionará con datos de prueba.");
     googleSheetsAvailable = false;
 } else {
     // sheets variable already declared above, do not redeclare
     (async () => {
         try {
             auth = new google.auth.GoogleAuth({
-                keyFile: SERVICE_ACCOUNT_FILE,
+                credentials: googleCredentials,
                 scopes: 'https://www.googleapis.com/auth/spreadsheets',
             });
             const client = await auth.getClient();
