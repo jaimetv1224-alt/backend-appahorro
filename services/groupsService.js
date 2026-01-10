@@ -1,10 +1,29 @@
 // CommonJS dependencies
 const { google } = require('googleapis');
 const path = require('path');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
-const SERVICE_ACCOUNT_FILE = path.resolve(__dirname, '../credentials.json');
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1xWRnnSp5WjveWHvFJFcNO7bCfB1jyADtawmdXPQJtEA';
+
+// Obtener credenciales desde variable de entorno o archivo
+let googleCredentials = null;
+if (process.env.GOOGLE_CREDENTIALS) {
+  try {
+    googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+  } catch (e) {
+    console.error('[GROUPS SERVICE] Error al parsear GOOGLE_CREDENTIALS:', e.message);
+  }
+} else {
+  const SERVICE_ACCOUNT_FILE = path.resolve(__dirname, '../credentials.json');
+  if (fs.existsSync(SERVICE_ACCOUNT_FILE)) {
+    try {
+      googleCredentials = JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_FILE, 'utf-8'));
+    } catch (e) {
+      console.error('[GROUPS SERVICE] Error al leer credentials.json:', e.message);
+    }
+  }
+}
 
 // Orden exacto de columnas según la hoja Groups
 const GROUPS_HEADERS = [
@@ -27,8 +46,11 @@ const GROUPS_HEADERS = [
 let sheetsClient;
 async function getSheetsClient() {
   if (sheetsClient) return sheetsClient;
+  if (!googleCredentials) {
+    throw new Error('Google credentials not available');
+  }
   const auth = new google.auth.GoogleAuth({
-    keyFile: SERVICE_ACCOUNT_FILE,
+    credentials: googleCredentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
   const client = await auth.getClient();

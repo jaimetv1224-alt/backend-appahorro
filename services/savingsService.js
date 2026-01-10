@@ -12,19 +12,34 @@ class SavingsService {
 
   async initializeAuth() {
     try {
-      const credentialsPath = path.join(__dirname, '..', 'credentials.json');
-      console.log('[SAVINGS SERVICE] Intentando cargar credenciales desde:', credentialsPath);
+      let credentials = null;
       
-      // Verificar si el archivo existe
-      if (!fs.existsSync(credentialsPath)) {
-        console.warn('[SAVINGS SERVICE] credentials.json no encontrado. Funcionando en modo de prueba.');
-        this.isAvailable = false;
-        return false;
+      // Intentar obtener credenciales desde variable de entorno (para Render)
+      if (process.env.GOOGLE_CREDENTIALS) {
+        console.log('[SAVINGS SERVICE] Cargando credenciales desde variable de entorno...');
+        try {
+          credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+          console.log('[SAVINGS SERVICE] Credenciales cargadas desde variable de entorno, client_email:', credentials.client_email);
+        } catch (e) {
+          console.error('[SAVINGS SERVICE] Error al parsear GOOGLE_CREDENTIALS:', e.message);
+        }
       }
       
-      console.log('[SAVINGS SERVICE] Archivo de credenciales encontrado, leyendo...');
-      const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
-      console.log('[SAVINGS SERVICE] Credenciales cargadas, client_email:', credentials.client_email);
+      // Si no hay credenciales en la variable de entorno, intentar leer el archivo (para desarrollo local)
+      if (!credentials) {
+        const credentialsPath = path.join(__dirname, '..', 'credentials.json');
+        console.log('[SAVINGS SERVICE] Intentando cargar credenciales desde archivo:', credentialsPath);
+        
+        if (!fs.existsSync(credentialsPath)) {
+          console.warn('[SAVINGS SERVICE] credentials.json no encontrado y no hay variable GOOGLE_CREDENTIALS. Funcionando en modo de prueba.');
+          this.isAvailable = false;
+          return false;
+        }
+        
+        console.log('[SAVINGS SERVICE] Archivo de credenciales encontrado, leyendo...');
+        credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+        console.log('[SAVINGS SERVICE] Credenciales cargadas del archivo, client_email:', credentials.client_email);
+      }
       
       // Usar GoogleAuth en lugar de JWT directamente (como en server.js)
       this.auth = new google.auth.GoogleAuth({

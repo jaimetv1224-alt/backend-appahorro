@@ -12,18 +12,38 @@ const { google } = require('googleapis');
 const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcrypt');
-const SERVICE_ACCOUNT_FILE = path.resolve(__dirname, '../credentials.json');
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1xWRnnSp5WjveWHvFJFcNO7bCfB1jyADtawmdXPQJtEA';
+
+// Obtener credenciales desde variable de entorno o archivo
+let googleCredentials = null;
+if (process.env.GOOGLE_CREDENTIALS) {
+  try {
+    googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+  } catch (e) {
+    console.error('[USERS SERVICE] Error al parsear GOOGLE_CREDENTIALS:', e.message);
+  }
+} else {
+  const SERVICE_ACCOUNT_FILE = path.resolve(__dirname, '../credentials.json');
+  if (fs.existsSync(SERVICE_ACCOUNT_FILE)) {
+    try {
+      googleCredentials = JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_FILE, 'utf-8'));
+    } catch (e) {
+      console.error('[USERS SERVICE] Error al leer credentials.json:', e.message);
+    }
+  }
+}
 
 // Google Sheets Auth
 let sheets;
 (async () => {
-  const auth = new google.auth.GoogleAuth({
-    keyFile: SERVICE_ACCOUNT_FILE,
-    scopes: 'https://www.googleapis.com/auth/spreadsheets',
-  });
-  const client = await auth.getClient();
-  sheets = google.sheets({ version: 'v4', auth: client });
+  if (googleCredentials) {
+    const auth = new google.auth.GoogleAuth({
+      credentials: googleCredentials,
+      scopes: 'https://www.googleapis.com/auth/spreadsheets',
+    });
+    const client = await auth.getClient();
+    sheets = google.sheets({ version: 'v4', auth: client });
+  }
 })();
 
 const USERS_HEADERS = ['Username','Email','HashedPassword','Role','Balance','CreatedDate'];
