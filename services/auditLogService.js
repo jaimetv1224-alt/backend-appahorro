@@ -1,19 +1,20 @@
 /**
  * SERVICE: AuditLog
- * Pestaña "AuditLog" en Google Sheets:
- *   - LogID      : UUID único
- *   - UserEmail  : email del usuario
- *   - Action     : acción realizada (create, update, delete, etc)
- *   - Target     : entidad objetivo (Users, Groups, etc)
- *   - Date       : fecha ISO
+ * Pestaña "AuditLog":
+ *   - LogID
+ *   - UserEmail
+ *   - Action
+ *   - Target
+ *   - Date
  */
 const { google } = require('googleapis');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1xWRnnSp5WjveWHvFJFcNO7bCfB1jyADtawmdXPQJtEA';
 
-// Obtener credenciales desde variable de entorno o archivo
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1xWRnnSp5WjveWHvFJFcNO7bCfB1jyADtawmdXPQJtEA';
+const AUDIT_HEADERS = ['LogID', 'UserEmail', 'Action', 'Target', 'Date'];
+
 let googleCredentials = null;
 if (process.env.GOOGLE_CREDENTIALS) {
   try {
@@ -32,26 +33,31 @@ if (process.env.GOOGLE_CREDENTIALS) {
   }
 }
 
-let sheets;
-(async () => {
-  if (googleCredentials) {
-    const auth = new google.auth.GoogleAuth({
-      credentials: googleCredentials,
-      scopes: 'https://www.googleapis.com/auth/spreadsheets',
-    });
-    const client = await auth.getClient();
-    sheets = google.sheets({ version: 'v4', auth: client });
+let sheetsClient = null;
+async function getSheetsClient() {
+  if (sheetsClient) return sheetsClient;
+  if (!googleCredentials) {
+    throw new Error('Google credentials not available');
   }
-})();
 
-const AUDIT_HEADERS = ['LogID','UserEmail','Action','Target','Date'];
+  const auth = new google.auth.GoogleAuth({
+    credentials: googleCredentials,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  });
+
+  const client = await auth.getClient();
+  sheetsClient = google.sheets({ version: 'v4', auth: client });
+  return sheetsClient;
+}
 
 async function ensureAuditHeader() {
+  const sheets = await getSheetsClient();
   const resp = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: 'AuditLog!1:1',
   });
-  const headers = resp.data.values[0] || [];
+  const headers = resp.data.values?.[0] || [];
+
   if (headers.length < AUDIT_HEADERS.length || AUDIT_HEADERS.some((h, i) => headers[i] !== h)) {
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
@@ -63,8 +69,10 @@ async function ensureAuditHeader() {
 }
 
 async function log({ UserEmail, Action, Target, Date }) {
+  const sheets = await getSheetsClient();
   await ensureAuditHeader();
-  const row = [uuidv4(), UserEmail, Action, Target, Date];
+
+  const row = [uuidv4(), UserEmail, Action, Target, Date || new Date().toISOString()];
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
     range: 'AuditLog!A2:E2',
