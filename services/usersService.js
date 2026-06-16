@@ -14,7 +14,7 @@ const fs = require('fs');
 const bcrypt = require('bcrypt');
 
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1xWRnnSp5WjveWHvFJFcNO7bCfB1jyADtawmdXPQJtEA';
-const USERS_HEADERS = ['Username', 'Email', 'HashedPassword', 'Role', 'Balance', 'CreatedDate'];
+const USERS_HEADERS = ['Username', 'Email', 'HashedPassword', 'Role', 'Balance', 'CreatedDate', 'Telefono', 'Cedula', 'Estado'];
 const VALID_GLOBAL_ROLES = new Set(['admin', 'member']);
 
 let googleCredentials = null;
@@ -70,7 +70,7 @@ async function ensureUsersHeader() {
   if (headers.length < USERS_HEADERS.length || USERS_HEADERS.some((h, i) => headers[i] !== h)) {
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'Users!A1:F1',
+      range: 'Users!A1:I1',
       valueInputOption: 'RAW',
       resource: { values: [USERS_HEADERS] },
     });
@@ -83,7 +83,7 @@ async function listAllUsers() {
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: 'Users!A2:F',
+    range: 'Users!A2:I',
   });
 
   return res.data.values || [];
@@ -128,6 +128,9 @@ async function createUser(user) {
   } else {
     throw new Error('La contraseña importada no tiene un formato válido.');
   }
+  const telefono = (user?.Telefono || '').toString().trim();
+  const cedula = (user?.Cedula || '').toString().trim();
+  const estado = (user?.Estado || 'activo').toString().trim().toLowerCase();
   const row = [
     username,
     email,
@@ -135,12 +138,15 @@ async function createUser(user) {
     role,
     balance,
     new Date().toISOString(),
+    telefono,
+    cedula,
+    estado,
   ];
 
   const sheets = await getSheetsClient();
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: 'Users!A2:F2',
+    range: 'Users!A2:I2',
     valueInputOption: 'RAW',
     resource: { values: [row] },
   });
