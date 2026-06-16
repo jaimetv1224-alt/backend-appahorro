@@ -9,13 +9,136 @@ const xlsx = require('xlsx');
 const fs = require('fs');
 require('dotenv').config();
 
+const jwt = require('jsonwebtoken');
+
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// --- CORS ---
+// Por defecto se permite cualquier origen (la seguridad real la da el token Bearer, no cookies).
+// Para restringir, definir FRONTEND_ORIGINS="https://juntago.com,https://www.juntago.com" en el entorno.
+const allowedOrigins = (process.env.FRONTEND_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+if (allowedOrigins.length > 0) {
+  app.use(cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // apps nativas / curl
+      return cb(null, allowedOrigins.includes(origin));
+    },
+  }));
+} else {
+  app.use(cors());
+}
+app.use(express.json({ limit: '5mb' }));
 const upload = multer({ dest: 'uploads/' });
+
+// --- AUTENTICACION (JWT) ---
+if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
+  console.error('[AUTH] FATAL: JWT_SECRET no esta definido en produccion. Defínelo en las variables de entorno (Render) y reinicia.');
+  process.exit(1);
+}
+const JWT_SECRET = process.env.JWT_SECRET || 'juntago-dev-secret-CAMBIAR-EN-PRODUCCION';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '30d';
+if (!process.env.JWT_SECRET) {
+  console.warn('[AUTH] ADVERTENCIA: JWT_SECRET no definido. Usando secreto de desarrollo (solo dev). Define JWT_SECRET en produccion.');
+}
+
+function signUserToken(payload) {
+  return jwt.sign(
+    { email: (payload.email || '').toString().trim().toLowerCase(), role: payload.role || 'member' },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN }
+  );
+}
+
+function readToken(req) {
+  const header = req.headers.authorization || req.headers.Authorization || '';
+  if (typeof header === 'string' && header.startsWith('Bearer ')) {
+    return header.slice(7).trim();
+  }
+  return null;
+}
+
+function decodeToken(req) {
+  const token = readToken(req);
+  if (!token) return null;
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch (e) {
+    return null;
+  }
+}
+
+function requireAuth(req, res, next) {
+  const payload = decodeToken(req);
+  if (!payload || !payload.email) {
+    return res.status(401).json({ message: 'No autorizado. Inicia sesion nuevamente.' });
+  }
+  req.user = { email: payload.email.toString().trim().toLowerCase(), role: (payload.role || 'member') };
+  next();
+}
+
+function optionalAuth(req, res, next) {
+  const payload = decodeToken(req);
+  if (payload && payload.email) {
+    req.user = { email: payload.email.toString().trim().toLowerCase(), role: (payload.role || 'member') };
+  }
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Acceso restringido a administradores.' });
+  }
+  next();
+}
+
+// Rutas accesibles sin token
+const PUBLIC_EXACT_PATHS = new Set([
+  '/api/login',
+  '/api/ping',
+  '/api/test-endpoint',
+]);
+// Prefijos publicos (imagenes de comprobantes se cargan via <img>, no pueden enviar header)
+const PUBLIC_PREFIXES = ['/api/payment-image/'];
+// Registro: autenticacion opcional (un admin con token puede crear con rol; el publico crea 'member')
+const OPTIONAL_AUTH_PATHS = new Set(['/api/registrar-usuario-en-sheet']);
+
+// Gate global: por defecto todo exige token (default-deny)
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  const p = req.path;
+  if (PUBLIC_EXACT_PATHS.has(p)) return next();
+  if (PUBLIC_PREFIXES.some((prefix) => p.startsWith(prefix))) return next();
+  if (OPTIONAL_AUTH_PATHS.has(p)) return optionalAuth(req, res, next);
+  return requireAuth(req, res, next);
+});
 
 const normalizeEmailKey = (value) => (value || '').toString().trim().toLowerCase();
 const normalizeGroupKey = (value) => (value || '').toString().trim();
+// Sanea texto que se escribe a Google Sheets para evitar inyección de fórmulas
+// (CSV/formula injection): un valor que empieza con = + - @ se prefija con apostrofe
+// para que Sheets lo trate como texto literal, no como fórmula ejecutable.
+const sanitizeCell = (value, maxLen = 500) => {
+  let s = (value == null ? '' : value).toString();
+  if (s.length > maxLen) s = s.slice(0, maxLen);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return s;
+};
+// Parser de dinero tolerante a locale es-EC: "137,37" -> 137.37, "1.234,56" -> 1234.56
+const parseMoney = (value) => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  let s = (value == null ? '' : value).toString().trim().replace(/\s/g, '').replace(/[^\d.,-]/g, '');
+  if (!s) return 0;
+  if (s.includes('.') && s.includes(',')) {
+    s = s.replace(/\./g, '').replace(',', '.'); // . = miles, , = decimal
+  } else if (s.includes(',')) {
+    s = s.replace(',', '.');
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+};
 const isQuotaExceededError = (error) => {
   const statusCandidates = [
     error?.status,
@@ -52,7 +175,7 @@ async function userBelongsToGroupSafe(sheetsClient, userEmail, groupId) {
 
 // GET /api/grupos-del-usuario?userEmail=...
 app.get('/api/grupos-del-usuario', async (req, res) => {
-  const normalizedUserEmail = normalizeEmailKey(req.query.userEmail);
+  const normalizedUserEmail = normalizeEmailKey(selfEmail(req, req.query.userEmail));
   if (!normalizedUserEmail) {
     return res.status(400).json({ error: 'Falta parÃ¡metro userEmail' });
   }
@@ -78,19 +201,26 @@ app.get('/api/grupos-del-usuario', async (req, res) => {
     try {
       const groupsResp = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: 'Groups!A2:N',
+        range: 'Groups!A2:Q',
       });
       allGroups = groupsResp.data.values || [];
     } catch (e) {}
-    // Mapear nombre del grupo
+    // Mapear nombre y configuracion financiera del grupo.
+    // Indices segun GROUPS_HEADERS: 1=GroupName, 14=TipoGrupo, 15=ValorAccion, 16=PorcentajeInteresMensual
     const result = userGroups.map(g => {
       const found = allGroups.find(row => row[0] === g.groupId);
+      const groupName = found ? (found[1] || '') : '';
       return {
         groupId: g.groupId,
         groupRole: g.groupRole,
         joinDate: g.joinDate,
         estado: g.estado,
-        groupName: found ? found[1] : ''
+        groupName,
+        GroupName: groupName,
+        name: groupName,
+        TipoGrupo: found ? (found[14] || '') : '',
+        ValorAccion: found ? (found[15] || '') : '',
+        PorcentajeInteresMensual: found ? (found[16] || '') : ''
       };
     });
     return res.json({ grupos: result });
@@ -111,7 +241,7 @@ app.get('/api/grupos-del-usuario', async (req, res) => {
 app.get('/api/obtener-acciones', async (req, res) => {
   try {
     const normalizedGroupId = normalizeGroupKey(req.query.groupId);
-    const normalizedUserEmail = normalizeEmailKey(req.query.userEmail);
+    const normalizedUserEmail = normalizeEmailKey(selfEmail(req, req.query.userEmail));
 
     if (!normalizedGroupId || !normalizedUserEmail) {
       return res.status(400).json({ error: 'Faltan parÃ¡metros requeridos' });
@@ -135,9 +265,9 @@ app.get('/api/obtener-acciones', async (req, res) => {
     );
     return res.json({ shares: filtered.map(row => ({
       date:        row[2],
-      shares:      Number(row[3]),
-      shareValue:  Number(row[4]),
-      interestRate:Number(row[5])
+      shares:      parseMoney(row[3]),
+      shareValue:  parseMoney(row[4]),
+      interestRate:parseMoney(row[5])
     })) });
   } catch (err) {
     console.error('Error en /api/obtener-acciones:', err);
@@ -148,12 +278,19 @@ app.get('/api/obtener-acciones', async (req, res) => {
 // POST /api/registrar-acciones
 app.post('/api/registrar-acciones', async (req, res) => {
   try {
-    const { groupId, userEmail, date, shares, shareValue, interestRate } = req.body;
+    const { groupId, date, shares, shareValue, interestRate } = req.body;
+    const userEmail = selfEmail(req, req.body.userEmail); // se registra a nombre del usuario autenticado
     if (!groupId || !userEmail || !date || typeof shares !== 'number'
         || typeof shareValue !== 'number' || typeof interestRate !== 'number') {
       return res.status(400).json({ error: 'Faltan parÃ¡metros' });
     }
+    if (!Number.isFinite(shares) || shares <= 0 || !Number.isFinite(shareValue) || shareValue <= 0 || !Number.isFinite(interestRate) || interestRate < 0) {
+      return res.status(400).json({ error: 'Cantidad de acciones y valor deben ser numeros positivos; la tasa no puede ser negativa.' });
+    }
     const sheets = await getSheetsClient();
+    if (req.user.role !== 'admin' && !(await userBelongsToGroupSafe(sheets, userEmail, groupId))) {
+      return res.status(403).json({ error: 'No perteneces a este grupo.' });
+    }
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
       range: 'Acciones!A2:G',
@@ -199,11 +336,15 @@ async function fetchMembersFromSheets(groupId) {
 app.get('/api/obtener-miembros', async (req, res) => {
   try {
     const normalizedGroupId = normalizeGroupKey(req.query.groupId);
-    const normalizedUserEmail = normalizeEmailKey(req.query.userEmail);
-    console.log('obtener-miembros groupId=', normalizedGroupId);
     if (!normalizedGroupId) {
       return res.status(400).json({ error: 'Falta parÃ¡metro groupId' });
     }
+    // Admin o gestor del grupo ven la lista completa; un miembro normal solo su propia ficha
+    const isPrivileged = req.user.role === 'admin' || await canManageGroup(req.user.email, normalizedGroupId);
+    const normalizedUserEmail = isPrivileged
+      ? normalizeEmailKey(req.query.userEmail)
+      : req.user.email;
+    console.log('obtener-miembros groupId=', normalizedGroupId);
 
     if (normalizedUserEmail) {
       const sheets = await getSheetsClient();
@@ -234,7 +375,11 @@ app.use((req, res, next) => {
 
 // Middleware para loggear todas las peticiones entrantes (despuÃ©s de cors y express.json)
 app.use((req, res, next) => {
-  console.log(`[BACKEND REQUEST LOGGER] Method: ${req.method}, URL: ${req.url}, Body: ${JSON.stringify(req.body)}`);
+  const safeBody = { ...(req.body || {}) };
+  for (const k of Object.keys(safeBody)) {
+    if (/pass|contrase|password|hashed|token/i.test(k)) safeBody[k] = '***';
+  }
+  console.log(`[BACKEND REQUEST LOGGER] Method: ${req.method}, URL: ${req.url}, Body: ${JSON.stringify(safeBody)}`);
   next();
 });
 
@@ -278,18 +423,25 @@ async function getSheetsClient() {
 // POST /api/registrar-ahorros
 app.post('/api/registrar-ahorros', async (req, res) => {
   try {
-    const { groupId, userEmail, date, amount } = req.body;
+    const { groupId, date, amount } = req.body;
+    const userEmail = selfEmail(req, req.body.userEmail); // se registra a nombre del usuario autenticado
     if (!groupId || !userEmail || !date || typeof amount !== 'number') {
       return res.status(400).json({ error: 'Faltan parÃ¡metros requeridos' });
     }
+    if (typeof amount === 'number' && amount <= 0) {
+      return res.status(400).json({ error: 'El monto debe ser mayor a 0' });
+    }
     const sheets = await getSheetsClient();
-    const range = 'Savings!A:E';
+    if (req.user.role !== 'admin' && !(await userBelongsToGroupSafe(sheets, userEmail, groupId))) {
+      return res.status(403).json({ error: 'No perteneces a este grupo.' });
+    }
+    // Convencion canonica de Savings: A=email, B=group, C=amount, D=date, E=type
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range,
+      range: 'Savings!A:E',
       valueInputOption: 'USER_ENTERED',
       requestBody: {
-        values: [[userEmail, groupId, date, amount, new Date().toISOString()]],
+        values: [[userEmail, groupId, amount, date, 'mensual']],
       },
     });
     return res.status(200).json({ success: true });
@@ -303,7 +455,7 @@ app.post('/api/registrar-ahorros', async (req, res) => {
 app.get('/api/obtener-ahorros', async (req, res) => {
   try {
     const normalizedGroupId = normalizeGroupKey(req.query.groupId);
-    const normalizedUserEmail = normalizeEmailKey(req.query.userEmail);
+    const normalizedUserEmail = normalizeEmailKey(selfEmail(req, req.query.userEmail));
 
     if (!normalizedGroupId || !normalizedUserEmail) {
       return res.status(400).json({ error: 'Faltan parÃ¡metros requeridos' });
@@ -324,7 +476,7 @@ app.get('/api/obtener-ahorros', async (req, res) => {
         normalizeEmailKey(row?.[0]) === normalizedUserEmail &&
         normalizeGroupKey(row?.[1]) === normalizedGroupId
       )
-      .map(row => ({ date: row[2], amount: Number(row[3]) }));
+      .map(row => ({ date: row[3], amount: parseMoney(row[2]) }));
     return res.status(200).json({ savings });
   } catch (err) {
     console.error('Error en /api/obtener-ahorros:', err);
@@ -336,7 +488,10 @@ app.get('/api/obtener-ahorros', async (req, res) => {
 app.get('/api/obtener-prestamos', async (req, res) => {
   try {
     const normalizedGroupId = normalizeGroupKey(req.query.groupId);
-    const normalizedUserEmail = normalizeEmailKey(req.query.userEmail);
+    // Admin sin userEmail => todos los prestamos del grupo; miembro => siempre solo los suyos
+    const normalizedUserEmail = req.user.role === 'admin'
+      ? normalizeEmailKey(req.query.userEmail || '')
+      : req.user.email;
 
     if (!normalizedGroupId) {
       return res.status(400).json({ error: 'Falta parÃ¡metro groupId' });
@@ -349,10 +504,10 @@ app.get('/api/obtener-prestamos', async (req, res) => {
         return res.status(403).json({ error: 'El usuario no pertenece al grupo solicitado.' });
       }
     }
-    const range = 'Loans!A2:I';
+    // Loans real: [A=LoanID, B=UserEmail, C=GroupID, D=AmountApproved, E=StartDate, F=DueDate, G=InterestRate(mensual), H=Status, I=Term, J=Total]
     const resp = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range,
+      range: 'Loans!A2:J',
     });
     const rows = resp.data.values || [];
     let filtered;
@@ -364,17 +519,41 @@ app.get('/api/obtener-prestamos', async (req, res) => {
     } else {
       filtered = rows.filter(row => normalizeGroupKey(row?.[2]) === normalizedGroupId);
     }
-    const loans = filtered.map(row => ({
-      loanId: row[0] || '',
-      userEmail: row[1] || '',
-      groupId: row[2] || '',
-      amount: Number(row[3] || 0),
-      purpose: row[4] || '',
-      status: row[5] || '',
-      requestDate: row[6] || '',
-      approvedDate: row[7] || '',
-      details: row[8] || ''
-    }));
+
+    // Leer pagos una sola vez y agregar por loanId (solo pagos aprobados reducen el saldo)
+    let paidByLoan = {};
+    try {
+      const payResp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'LoanPayments!A2:O' });
+      (payResp.data.values || []).forEach((r) => {
+        const lid = (r[2] || '').toString().trim();
+        const estado = (r[6] || '').toString().trim().toLowerCase();
+        if (lid && ['approved', 'aprobado'].includes(estado)) {
+          paidByLoan[lid] = (paidByLoan[lid] || 0) + parseMoney(r[3]);
+        }
+      });
+    } catch (e) { paidByLoan = {}; }
+
+    const loans = filtered.map(row => {
+      const principal = parseMoney(row[3]);
+      const interestRate = parseMoney(row[6]);
+      const term = Number(row[8] || 0);
+      const total = parseMoney(row[9]) || principal;
+      const paid = paidByLoan[(row[0] || '').toString().trim()] || 0;
+      return {
+        loanId: row[0] || '',
+        userEmail: row[1] || '',
+        groupId: row[2] || '',
+        amount: principal,
+        startDate: row[4] || '',
+        dueDate: row[5] || '',
+        interestRate,
+        status: row[7] || '',
+        term,
+        totalAPagar: total,
+        paid: Math.round(paid * 100) / 100,
+        remainingBalance: Math.max(0, Math.round((total - paid) * 100) / 100)
+      };
+    });
     return res.status(200).json({ loans });
   } catch (err) {
     console.error('Error en /api/obtener-prestamos:', err);
@@ -386,7 +565,7 @@ app.get('/api/obtener-prestamos', async (req, res) => {
 // GET /api/obtener-utilidades?groupId=...&userEmail=...
 app.get('/api/obtener-utilidades', async (req, res) => {
   const normalizedGroupId = normalizeGroupKey(req.query.groupId);
-  const normalizedUserEmail = normalizeEmailKey(req.query.userEmail);
+  const normalizedUserEmail = normalizeEmailKey(selfEmail(req, req.query.userEmail));
 
   if (!normalizedGroupId) {
     return res.status(400).json({ error: 'Falta parÃ¡metro groupId' });
@@ -419,9 +598,9 @@ app.get('/api/obtener-utilidades', async (req, res) => {
     }
     const utilities = filtered.map(r => {
       const date         = r[2];
-      const shares       = Number(r[3] || 0);
-      const shareValue   = Number(r[4] || 0);
-      const interestRate = Number(r[5] || 0) / 100; // convierto % en decimal
+      const shares       = parseMoney(r[3]);
+      const shareValue   = parseMoney(r[4]);
+      const interestRate = parseMoney(r[5]) / 100; // convierto % en decimal
       // utilidad = cantidad ? valor ? tasa
       const amount = +(shares * shareValue * interestRate).toFixed(2);
       return { userEmail: r[0], date, amount };
@@ -471,7 +650,8 @@ app.post('/api/registrar-usuario-en-sheet', async (req, res) => {
     try {
         const { Username, Email, password, Role, Balance } = req.body || {};
         const normalizedEmail = normalize(Email);
-        const normalizedRole = normalizeGlobalRole(Role);
+        // Solo un admin autenticado puede asignar rol; el registro publico siempre crea 'member'
+        const normalizedRole = (req.user && req.user.role === 'admin') ? normalizeGlobalRole(Role) : 'member';
         const numericBalance = Number(Balance ?? 0);
         if (!Username || !normalizedEmail || !password || Number.isNaN(numericBalance)) {
             return res.status(400).json({ message: 'Faltan datos del usuario. Se requieren: Username, Email y password vÃ¡lidos.' });
@@ -497,7 +677,7 @@ app.post('/api/registrar-usuario-en-sheet', async (req, res) => {
 // Endpoint para crear un grupo (mejorado)
 // Refactor: Usar groupsService y auditLogService
 // const groupsService = require('./services/groupsService');
-app.post('/api/crear-grupo-en-sheet', async (req, res) => {
+app.post('/api/crear-grupo-en-sheet', requireAdmin, async (req, res) => {
     try {
         const group = req.body;
         if (!group.GroupName || !group.CreatedBy) {
@@ -510,7 +690,7 @@ app.post('/api/crear-grupo-en-sheet', async (req, res) => {
     }
 });
 
-app.delete('/api/eliminar-grupo/:groupId', async (req, res) => {
+app.delete('/api/eliminar-grupo/:groupId', requireAdmin, async (req, res) => {
     const groupId = (req.params.groupId || '').toString().trim();
     if (!groupId) {
         return res.status(400).json({ message: 'Se requiere groupId.' });
@@ -551,7 +731,7 @@ app.post('/api/login', async (req, res) => {
         // 1. Leer todos los usuarios de la hoja 'Users'
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: 'Users!A:E', // AsegÃºrate que este rango cubra todas las columnas necesarias
+            range: 'Users!A:I', // Cubre Estado (col I) para bloquear cuentas inactivas
         });
 
         const rows = response.data.values;
@@ -594,10 +774,21 @@ app.post('/api/login', async (req, res) => {
         console.log(`[LOGIN ENDPOINT] Comparando contraseña para ${email}. Hash disponible: ${Boolean(hashedPasswordFromSheet)}`);
 
         if (bcrypt.compareSync(password, hashedPasswordFromSheet)) {
+            // Bloquear cuentas desactivadas (baja logica)
+            const estadoColumnIndex = headerRow.findIndex(header => header && header.trim().toLowerCase() === 'estado');
+            const estado = estadoColumnIndex !== -1 ? (userRow[estadoColumnIndex] || '').toString().trim().toLowerCase() : '';
+            if (estado === 'inactivo') {
+                console.log(`[LOGIN ENDPOINT] Cuenta inactiva: ${email}`);
+                return res.status(403).json({ message: 'Tu cuenta esta desactivada. Contacta al administrador.' });
+            }
             // ContraseÃ±a correcta
             console.log(`[LOGIN ENDPOINT] Login exitoso para ${email}`);
+            const normalizedRole = normalizeGlobalRole(userRow[roleColumnIndex]);
+            const loginEmail = (userRow[emailColumnIndex] || '').toString().trim().toLowerCase();
+            const token = signUserToken({ email: loginEmail, role: normalizedRole });
             res.status(200).json({
                 message: 'Login exitoso.',
+                token,
                 user: {
                     username: userRow[usernameColumnIndex],
                     email: userRow[emailColumnIndex],
@@ -729,6 +920,167 @@ async function canManageGroup(userEmail, groupId) {
     return managedGroupIds.has(normalizedGroupId);
 }
 
+// Verifica que el solicitante sea admin global o gestor (presidente/tesorero) del grupo.
+// Responde 403 y devuelve false si no tiene permiso. canManageGroup ya cubre el caso admin.
+async function assertGroupManager(req, res, groupId) {
+    const gid = (groupId || '').toString().trim();
+    if (!gid) {
+        res.status(400).json({ success: false, message: 'Falta el identificador del grupo.' });
+        return false;
+    }
+    if (await canManageGroup(req.user.email, gid)) return true;
+    res.status(403).json({ success: false, message: 'No tienes permisos para gestionar este grupo.' });
+    return false;
+}
+
+// Verifica que el solicitante sea admin global o miembro del grupo (para lecturas de datos de grupo).
+async function assertGroupMember(req, res, groupId) {
+    const gid = (groupId || '').toString().trim();
+    if (!gid) {
+        res.status(400).json({ success: false, message: 'Falta el identificador del grupo.' });
+        return false;
+    }
+    if (req.user.role === 'admin') return true;
+    const sheetsClient = await getSheetsClient();
+    if (await userBelongsToGroupSafe(sheetsClient, req.user.email, gid)) return true;
+    res.status(403).json({ success: false, message: 'No perteneces a este grupo.' });
+    return false;
+}
+
+// Devuelve el email cuyo dato puede consultarse: el propio salvo que sea admin (que puede consultar otros).
+function selfEmail(req, paramEmail) {
+    if (req.user && req.user.role === 'admin') {
+        return (paramEmail || req.user.email);
+    }
+    return req.user ? req.user.email : '';
+}
+
+// Verifica que la meta (MetasAhorro: A=goalId, B=email) pertenezca al solicitante (o sea admin).
+async function assertGoalOwner(req, res, goalId) {
+    const id = (goalId || '').toString().trim();
+    if (!id) { res.status(400).json({ success: false, message: 'Falta goalId.' }); return false; }
+    if (req.user && req.user.role === 'admin') return true;
+    try {
+        const sheetsClient = await getSheetsClient();
+        const resp = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'MetasAhorro!A:B' });
+        const rows = resp.data.values || [];
+        const row = rows.find((r) => (r[0] || '').toString().trim() === id);
+        if (!row) { res.status(404).json({ success: false, message: 'Meta no encontrada.' }); return false; }
+        if (normalizeEmailKey(row[1]) === req.user.email) return true;
+        res.status(403).json({ success: false, message: 'No puedes modificar metas de otro usuario.' });
+        return false;
+    } catch (e) {
+        res.status(500).json({ success: false, message: 'Error verificando la meta.' });
+        return false;
+    }
+}
+
+// Devuelve el rol de grupo (presidente/tesorero/secretario/member) del usuario en un grupo, leido del servidor.
+async function getUserGroupRole(userEmail, groupId) {
+    const email = normalizeEmailKey(userEmail);
+    const gid = (groupId || '').toString().trim();
+    if (!email || !gid) return '';
+    const sheetsClient = await getSheetsClient();
+    const resp = await sheetsClient.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: 'UserGroupLinks!A2:E',
+    });
+    const links = resp.data.values || [];
+    const found = links.find((row) => (
+        normalizeEmailKey(row?.[0]) === email && (row?.[1] || '').toString().trim() === gid
+    ));
+    return found ? normalizeGroupRole(found[3]) : '';
+}
+
+// Tasa de interes MENSUAL configurada del grupo (Groups col Q = PorcentajeInteresMensual, indice 16)
+async function getGroupMonthlyRate(groupId) {
+    const gid = (groupId || '').toString().trim();
+    if (!gid) return 0;
+    try {
+        const sheetsClient = await getSheetsClient();
+        const resp = await sheetsClient.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: 'Groups!A2:Q',
+        });
+        const rows = resp.data.values || [];
+        const row = rows.find((r) => (r[0] || '').toString().trim() === gid);
+        return row ? parseMoney(row[16]) : 0;
+    } catch (e) {
+        return 0;
+    }
+}
+
+// Extrae el plazo (meses) del texto de Detalles, ej. "Plazo: 12"
+function parsePlazo(detalles) {
+    const m = (detalles || '').toString().match(/plazo\s*:?\s*(\d+)/i);
+    const n = m ? parseInt(m[1], 10) : 0;
+    return n > 0 ? n : 1;
+}
+
+// Suma de pagos APROBADOS de un prestamo (LoanPayments: C=loanId idx2, D=amount idx3, G=status idx6)
+async function getApprovedPaymentsTotal(loanId) {
+    const id = (loanId || '').toString().trim();
+    if (!id) return 0;
+    try {
+        const sheetsClient = await getSheetsClient();
+        const resp = await sheetsClient.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: 'LoanPayments!A2:O',
+        });
+        const rows = resp.data.values || [];
+        return rows
+            .filter((r) => (r[2] || '').toString().trim() === id && ['approved', 'aprobado'].includes((r[6] || '').toString().trim().toLowerCase()))
+            .reduce((s, r) => s + parseMoney(r[3]), 0);
+    } catch (e) {
+        return 0;
+    }
+}
+
+// Crea el prestamo aprobado en la hoja Loans (con interes) + transaccion del principal. Evita duplicados.
+async function crearPrestamoAprobadoDesdeSolicitud(sheetsClient, loanId, email, loanGroupId, montoRaw, detalles) {
+    const id = (loanId || '').toString().trim();
+    if (!id) return null;
+    const ex = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Loans!A:A' });
+    const ids = (ex.data.values || []).map((r) => (r[0] || '').toString().trim());
+    if (ids.includes(id)) return { yaExistia: true };
+    const principal = parseMoney(montoRaw);
+    const term = parsePlazo(detalles);
+    const monthlyRate = await getGroupMonthlyRate(loanGroupId);
+    const totalConInteres = Math.round(principal * (1 + (monthlyRate / 100) * term) * 100) / 100;
+    const startDate = new Date().toISOString();
+    let dueDate = '';
+    try { const d = new Date(); d.setMonth(d.getMonth() + term); dueDate = d.toISOString(); } catch (e) { dueDate = ''; }
+    await sheetsClient.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID, range: 'Loans!A:J', valueInputOption: 'RAW',
+        requestBody: { values: [[id, email, loanGroupId, principal, startDate, dueDate, monthlyRate, 'aprobado', term, totalConInteres]] },
+    });
+    await sheetsClient.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID, range: 'Transactions!A:H', valueInputOption: 'RAW',
+        requestBody: { values: [[Date.now().toString(), email, 'loan', principal, `Prestamo aprobado por votacion (plazo ${term}m, ${monthlyRate}%/mes, total $${totalConInteres})`, new Date().toISOString(), 'loan', '']] },
+    });
+    return { totalConInteres, term, monthlyRate, yaExistia: false };
+}
+
+// Devuelve el GroupID REAL de una solicitud (leyendo su hoja por id), no el que envía el cliente.
+async function getSolicitudGroup(sheetsClient, tipo, solicitudId) {
+    const sheetMap = { prestamo: 'SolicitudesPrestamos', accion: 'SolicitudesAcciones', adelanto: 'SolicitudesAdelantos' };
+    const sName = sheetMap[tipo];
+    if (!sName) return '';
+    try {
+        const resp = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `${sName}!A1:K` });
+        const rows = resp.data.values || [];
+        if (rows.length < 2) return '';
+        const hdr = rows[0].map(h => (h || '').toString().trim().toLowerCase());
+        const idCol = hdr.findIndex(h => h === 'id');
+        const groupCol = hdr.findIndex(h => h === 'group');
+        if (idCol === -1 || groupCol === -1) return '';
+        const row = rows.find((r, i) => i > 0 && (r[idCol] || '').toString().trim() === solicitudId.toString().trim());
+        return row ? (row[groupCol] || '').toString().trim() : '';
+    } catch (e) {
+        return '';
+    }
+}
+
 async function getLoanGroupMap() {
     const sheetsClient = await getSheetsClient();
     const requestsResp = await sheetsClient.spreadsheets.values.get({
@@ -807,6 +1159,8 @@ async function createUserGroupLink({ UserEmail, GroupID, JoinDate, GroupRole }) 
 
 app.post('/api/vincular-usuario-grupo-en-sheet', async (req, res) => {
     try {
+        const targetGroupId = (req.body?.GroupID || req.body?.groupId || '').toString().trim();
+        if (!(await assertGroupManager(req, res, targetGroupId))) return;
         const result = await createUserGroupLink(req.body || {});
         return res.status(result.status).json(result.body);
     } catch (error) {
@@ -825,6 +1179,7 @@ app.post('/api/asignar-usuario-grupo', async (req, res) => {
             GroupRole: GroupRole || 'member',
             JoinDate: JoinDate || new Date().toISOString(),
         };
+        if (!(await assertGroupManager(req, res, payload.GroupID))) return;
         const result = await createUserGroupLink(payload);
         return res.status(result.status).json(result.body);
     } catch (error) {
@@ -834,7 +1189,7 @@ app.post('/api/asignar-usuario-grupo', async (req, res) => {
 });
 
 // Endpoint para listar todos los vÃ­nculos usuario-grupo
-app.get('/api/obtener-usergrouplinks', async (req, res) => {
+app.get('/api/obtener-usergrouplinks', requireAdmin, async (req, res) => {
     try {
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
@@ -859,21 +1214,25 @@ app.get('/api/obtener-usergrouplinks', async (req, res) => {
 // Endpoint para Loans
 // Refactor: Usar loansService y auditLogService
 const loansService = require('./services/loansService');
-app.post('/api/registrar-prestamo-en-sheet', async (req, res) => {
+app.post('/api/registrar-prestamo-en-sheet', requireAdmin, async (req, res) => {
     try {
         const loan = req.body;
-        if (!loan.LoanID || !loan.UserEmail || !loan.GroupID || loan.Amount === undefined || !loan.Purpose || !loan.Status || !loan.RequestDate) {
-            return res.status(400).json({ message: 'Faltan datos del prÃ©stamo. Se requieren: LoanID, UserEmail, GroupID, Amount, Purpose, Status, RequestDate.' });
+        if (!loan.LoanID || !loan.UserEmail || !loan.GroupID || loan.Amount === undefined) {
+            return res.status(400).json({ message: 'Faltan datos del prestamo. Se requieren: LoanID, UserEmail, GroupID, Amount.' });
+        }
+        if (!(parseMoney(loan.Amount) > 0)) {
+            return res.status(400).json({ message: 'El monto del prestamo debe ser un numero positivo.' });
         }
         const created = await loansService.createLoan(loan);
-        res.status(201).json({ message: 'PrÃ©stamo registrado en Google Sheet con Ã©xito.', data: created });
+        res.status(201).json({ message: 'Prestamo registrado en Google Sheet con exito.', data: created });
     } catch (error) {
-        res.status(500).json({ message: 'Error al registrar prÃ©stamo en Sheet.', error: error.message });
+        console.error('[REGISTRAR PRESTAMO] Error:', error.message);
+        res.status(500).json({ message: 'Error al registrar prestamo en Sheet.' });
     }
 });
 
 // Endpoint para listar todos los prÃ©stamos
-app.get('/api/obtener-todos-prestamos', async (req, res) => {
+app.get('/api/obtener-todos-prestamos', requireAdmin, async (req, res) => {
     try {
         const loans = await loansService.getAllLoans();
         return res.status(200).json({ loans });
@@ -885,13 +1244,15 @@ app.get('/api/obtener-todos-prestamos', async (req, res) => {
 // Endpoint para Transactions
 app.post('/api/registrar-transaccion-en-sheet', async (req, res) => {
     // Cabeceras: TransactionID, UserEmail, Type, Amount, Description, Date, Category, Icon
-    const { TransactionID, UserEmail, Type, Amount, Description, Date, Category, Icon } = req.body;
+    const { TransactionID, Type, Amount, Description, Date, Category, Icon } = req.body;
+    // La transaccion se registra a nombre del usuario autenticado (admin puede indicar otro)
+    const UserEmail = selfEmail(req, req.body.UserEmail);
 
     if (!TransactionID || !UserEmail || !Type || Amount === undefined || !Date || !Category) {
-        return res.status(400).json({ message: 'Faltan datos de la transacciÃ³n. Se requieren: TransactionID, UserEmail, Type, Amount, Date, Category.' });
+        return res.status(400).json({ message: 'Faltan datos de la transacciÃ³n. Se requieren: TransactionID, Type, Amount, Date, Category.' });
     }
 
-    const values = [[TransactionID, UserEmail, Type, Amount, Description || '', Date, Category, Icon || '']];
+    const values = [[TransactionID, UserEmail, Type, Amount, sanitizeCell(Description), Date, Category, Icon || '']];
     const resource = { values };
 
     try {
@@ -918,6 +1279,7 @@ app.get('/api/aportes/:groupId', async (req, res) => {
         if (!groupId) {
             return res.status(400).json({ message: 'groupId es requerido.', aportes: [] });
         }
+        if (!(await assertGroupMember(req, res, groupId))) return;
 
         await ensureSheetExists('Aportes', ['GroupID', 'Email', 'Monto', 'Fecha', 'CreatedAt'], sheets, SPREADSHEET_ID);
         const response = await sheets.spreadsheets.values.get({
@@ -952,9 +1314,18 @@ app.post('/api/agregar-aporte', async (req, res) => {
                 message: 'Faltan datos. Se requieren: GroupID, Email, Monto, Fecha.'
             });
         }
+        if (Number(Monto) <= 0 || Number.isNaN(Number(Monto))) {
+            return res.status(400).json({ message: 'El monto debe ser un numero mayor a 0.' });
+        }
+        // Admin/gestor del grupo pueden registrar a nombre de cualquier miembro; un miembro solo el suyo
+        const isPriv = req.user.role === 'admin' || await canManageGroup(req.user.email, (GroupID || '').toString().trim());
+        const contributorEmail = isPriv ? Email : req.user.email;
+        if (!(await userBelongsToGroupSafe(sheets, contributorEmail, GroupID))) {
+            return res.status(403).json({ message: 'El aportante no pertenece a este grupo.' });
+        }
 
         await ensureSheetExists('Aportes', ['GroupID', 'Email', 'Monto', 'Fecha', 'CreatedAt'], sheets, SPREADSHEET_ID);
-        const row = [[GroupID, Email, Number(Monto), Fecha, new Date().toISOString()]];
+        const row = [[GroupID, contributorEmail, Number(Monto), Fecha, new Date().toISOString()]];
         await sheets.spreadsheets.values.append({
             spreadsheetId: SPREADSHEET_ID,
             range: 'Aportes!A:E',
@@ -982,6 +1353,17 @@ app.post('/api/registrar-solicitud', async (req, res) => {
     if (!tipo || !data) {
         console.error('[SOLICITUD][ERROR] Faltan campos tipo o data:', req.body);
         return res.status(400).json({ message: 'Faltan campos tipo o data en la solicitud.' });
+    }
+    // La solicitud siempre se crea a nombre del usuario autenticado (no se puede solicitar por otro)
+    if (req.user.role !== 'admin') {
+        data.UserEmail = req.user.email;
+    } else if (!data.UserEmail) {
+        data.UserEmail = req.user.email;
+    }
+    // Validar el monto/cantidad: numero positivo y razonable (evita negativos, no numericos, NaN, overflow)
+    const montoSolicitado = parseMoney(tipo === 'accion' ? (data.Cantidad != null ? data.Cantidad : data.Monto) : data.Monto);
+    if (!Number.isFinite(montoSolicitado) || montoSolicitado <= 0 || montoSolicitado > 100000000) {
+        return res.status(400).json({ message: 'El monto/cantidad debe ser un numero positivo y valido.' });
     }
     const config = {
         prestamo: {
@@ -1055,19 +1437,15 @@ app.post('/api/registrar-solicitud', async (req, res) => {
         console.log('[REGISTRAR SOLICITUD] Tipo:', tipo);
         console.log('[REGISTRAR SOLICITUD] Data:', data);
         console.log('[REGISTRAR SOLICITUD] userGroup:', userGroup, 'userGroupRole:', userGroupRole);
-        // Asegura que la pestaÃ±a existe
-        // --- CORRECCI?N: Para tipo 'accion', asegurar solo 6 columnas reales ---
-        if (tipo === 'accion') {
-            const accionHeaders = ['ID', 'UserEmail', 'Cantidad', 'Estado', 'Fecha', 'Detalles'];
-            await sheetsApi.spreadsheets.values.update({
-                spreadsheetId: SPREADSHEET_ID,
-                range: `${config[tipo].sheet}!A1:F1`,
-                valueInputOption: 'RAW',
-                resource: { values: [accionHeaders] },
-            });
-        } else {
-            await ensureSheetExists(config[tipo].sheet, config[tipo].headers, sheetsApi, SPREADSHEET_ID);
-        }
+        // Asegura que la pestaña existe y que su cabecera coincide con la config
+        // (corrige hojas con header antiguo; p.ej. SolicitudesAcciones sin columna Group)
+        await ensureSheetExists(config[tipo].sheet, config[tipo].headers, sheetsApi, SPREADSHEET_ID);
+        await sheetsApi.spreadsheets.values.update({
+            spreadsheetId: SPREADSHEET_ID,
+            range: `${config[tipo].sheet}!A1`,
+            valueInputOption: 'RAW',
+            resource: { values: [config[tipo].headers] },
+        });
         // Prepara los valores (en el mismo orden que los headers)
         let values;
         let appendRange = `${config[tipo].sheet}!A:J`; // Extendido para incluir TasaInteres
@@ -1075,12 +1453,15 @@ app.post('/api/registrar-solicitud', async (req, res) => {
             values = [[
                 data.ID || Date.now().toString(),
                 data.UserEmail,
-                data.Cantidad || '',
+                userGroup,
+                userGroupRole,
+                data.Cantidad || data.Monto || '',
                 data.Estado || 'pendiente',
                 data.Fecha || new Date().toISOString(),
-                data.Detalles || ''
+                sanitizeCell(data.Detalles),
+                '' // AprobadoPor
             ]];
-            appendRange = `${config[tipo].sheet}!A:F`;
+            appendRange = `${config[tipo].sheet}!A:I`;
         } else if (tipo === 'prestamo') {
             values = [[
                 data.ID || Date.now().toString(),
@@ -1090,7 +1471,7 @@ app.post('/api/registrar-solicitud', async (req, res) => {
                 data.Monto || '',
                 data.Estado || 'pendiente',
                 data.Fecha || new Date().toISOString(),
-                data.Detalles || '',
+                sanitizeCell(data.Detalles),
                 '', // AprobadoPor
                 data.TasaInteres || 0 // Tasa de interÃ©s del grupo
             ]];
@@ -1103,7 +1484,7 @@ app.post('/api/registrar-solicitud', async (req, res) => {
                 data.Monto || data.Cantidad || '',
                 data.Estado || 'pendiente',
                 data.Fecha || new Date().toISOString(),
-                data.Detalles || '',
+                sanitizeCell(data.Detalles),
                 '' // AprobadoPor
             ]];
             appendRange = `${config[tipo].sheet}!A:I`;
@@ -1132,6 +1513,7 @@ app.post('/api/registrar-solicitud', async (req, res) => {
 // Endpoint para listar solicitudes pendientes por grupo
 app.get('/api/solicitudes-pendientes', async (req, res) => {
     const { group, tipo } = req.query;
+    if (!(await assertGroupMember(req, res, group))) return;
     const config = {
         prestamo: 'SolicitudesPrestamos',
         accion: 'SolicitudesAcciones',
@@ -1156,7 +1538,8 @@ app.get('/api/solicitudes-pendientes', async (req, res) => {
 
 // Endpoint para aprobar/rechazar solicitud
 app.post('/api/aprobar-solicitud', async (req, res) => {
-    const { tipo, solicitudId, aprobadorEmail, nuevoEstado } = req.body;
+    const { tipo, solicitudId, nuevoEstado } = req.body;
+    const aprobadorEmail = req.user.email; // identidad desde el token
     const config = {
         prestamo: 'SolicitudesPrestamos',
         accion: 'SolicitudesAcciones',
@@ -1174,8 +1557,12 @@ app.post('/api/aprobar-solicitud', async (req, res) => {
         const idCol = headers.findIndex(h => h.trim().toLowerCase() === 'id');
         const estadoCol = headers.findIndex(h => h.trim().toLowerCase() === 'estado');
         const aprobadoPorCol = headers.findIndex(h => h.trim().toLowerCase() === 'aprobadopor');
+        const groupCol = headers.findIndex(h => h.trim().toLowerCase() === 'group');
         const solicitudIdx = rows.findIndex((row, i) => i > 0 && row[idCol] === solicitudId);
         if (solicitudIdx === -1) return res.status(404).json({ message: 'Solicitud no encontrada.' });
+        // Solo admin o gestor (presidente/tesorero) del grupo de la solicitud pueden aprobar/rechazar
+        const solicitudGroup = groupCol !== -1 ? rows[solicitudIdx][groupCol] : '';
+        if (!(await assertGroupManager(req, res, solicitudGroup))) return;
         rows[solicitudIdx][estadoCol] = nuevoEstado;
         rows[solicitudIdx][aprobadoPorCol] = aprobadorEmail;
         await sheets.spreadsheets.values.update({
@@ -1184,6 +1571,14 @@ app.post('/api/aprobar-solicitud', async (req, res) => {
             valueInputOption: 'USER_ENTERED',
             resource: { values: [rows[solicitudIdx]] },
         });
+        // Si se aprueba un prestamo por esta via, crearlo en Loans con su interes (consistente con el flujo de votos)
+        if (tipo === 'prestamo' && nuevoEstado === 'aprobado') {
+            const r = rows[solicitudIdx];
+            const emailC = headers.findIndex(h => h.trim().toLowerCase() === 'useremail');
+            const montoC = headers.findIndex(h => h.trim().toLowerCase() === 'monto');
+            const detC = headers.findIndex(h => h.trim().toLowerCase() === 'detalles');
+            await crearPrestamoAprobadoDesdeSolicitud(sheets, solicitudId, r[emailC], solicitudGroup, r[montoC], r[detC]);
+        }
         res.json({ message: 'Solicitud actualizada correctamente.' });
     } catch (error) {
         res.status(500).json({ message: 'Error al actualizar solicitud.', error: error.message });
@@ -1198,6 +1593,7 @@ app.post('/api/aprobar-solicitud', async (req, res) => {
 app.get('/api/solicitudes-grupo', async (req, res) => {
     const { groupId } = req.query;
     if (!groupId) return res.status(400).json({ message: 'groupId requerido.' });
+    if (!(await assertGroupMember(req, res, groupId))) return;
     try {
         const sheetsClient = await getSheetsClient();
         const tipos = [
@@ -1273,6 +1669,12 @@ app.get('/api/votos-solicitud', async (req, res) => {
             fecha: row[6] || '',
             comentario: row[7] || '',
         }));
+        // Aislamiento: si hay votos, el solicitante debe ser admin o miembro del grupo de la solicitud
+        const grupoDeVotos = votos.length ? votos[0].grupoId : '';
+        if (grupoDeVotos && req.user.role !== 'admin') {
+            const pertenece = await userBelongsToGroupSafe(sheetsClient, req.user.email, grupoDeVotos);
+            if (!pertenece) return res.status(403).json({ message: 'No perteneces a este grupo.' });
+        }
         res.json({ votos });
     } catch (error) {
         res.status(500).json({ message: 'Error al obtener votos.', error: error.message });
@@ -1281,16 +1683,23 @@ app.get('/api/votos-solicitud', async (req, res) => {
 
 // Registrar voto de un líder sobre una solicitud
 app.post('/api/registrar-voto', async (req, res) => {
-    const { solicitudId, tipo, grupoId, aprobadoPor, rolAprobador, decision, comentario } = req.body;
-    if (!solicitudId || !tipo || !grupoId || !aprobadoPor || !rolAprobador || !decision) {
+    const { solicitudId, tipo, grupoId, decision, comentario } = req.body;
+    if (!solicitudId || !tipo || !grupoId || !decision) {
         return res.status(400).json({ message: 'Faltan campos requeridos.' });
     }
+    // Identidad y rol vienen del servidor, no del cliente (evita votos falsos / auto-aprobacion)
+    const aprobadoPor = req.user.email;
     const rolesValidos = new Set(['presidente', 'tesorero', 'secretario']);
-    if (!rolesValidos.has(rolAprobador.toLowerCase())) {
-        return res.status(403).json({ message: 'Solo líderes pueden votar.' });
-    }
     try {
         const sheetsClient = await getSheetsClient();
+        // Resolver el grupo REAL de la solicitud (no confiar en el grupoId del cliente -> evita votar en grupo ajeno)
+        const grupoReal = await getSolicitudGroup(sheetsClient, tipo, solicitudId);
+        if (!grupoReal) return res.status(404).json({ message: 'Solicitud no encontrada.' });
+        // El rol de lider se valida contra el grupo REAL de la solicitud
+        const rolAprobador = await getUserGroupRole(aprobadoPor, grupoReal);
+        if (!rolesValidos.has((rolAprobador || '').toLowerCase())) {
+            return res.status(403).json({ message: 'Solo lideres del grupo de la solicitud pueden votar.' });
+        }
         // Asegurar que la hoja existe
         await ensureSheetExists('AprobacionesAsamblea', [
             'SolicitudID', 'Tipo', 'GrupoID', 'AprobadoPor', 'RolAprobador', 'Decision', 'Fecha', 'Comentario'
@@ -1321,8 +1730,8 @@ app.post('/api/registrar-voto', async (req, res) => {
             range: 'AprobacionesAsamblea!A:H',
             valueInputOption: 'USER_ENTERED',
             resource: { values: [[
-                solicitudId, tipo, grupoId, aprobadoPor,
-                rolAprobador, decision, new Date().toISOString(), comentario || ''
+                solicitudId, tipo, grupoReal, aprobadoPor,
+                rolAprobador, decision, new Date().toISOString(), sanitizeCell(comentario)
             ]] },
         });
 
@@ -1375,6 +1784,11 @@ app.post('/api/registrar-voto', async (req, res) => {
                                 valueInputOption: 'USER_ENTERED',
                                 resource: { values: [solRows[solIdx]] },
                             });
+                            // Si es un prestamo aprobado por votacion, crearlo en Loans con su interes
+                            if (tipo === 'prestamo' && nuevoEstado === 'aprobado') {
+                                const r = solRows[solIdx];
+                                await crearPrestamoAprobadoDesdeSolicitud(sheetsClient, r[idCol], r[1], r[2], r[4], r[7]);
+                            }
                         }
                     }
                 }
@@ -1389,9 +1803,15 @@ app.post('/api/registrar-voto', async (req, res) => {
 
 // Registrar acta de asamblea (secretario)
 app.post('/api/registrar-acta', async (req, res) => {
-    const { grupoId, titulo, contenido, creadaPor, asistentes } = req.body;
-    if (!grupoId || !titulo || !creadaPor) {
-        return res.status(400).json({ message: 'Faltan campos: grupoId, titulo, creadaPor.' });
+    const { grupoId, titulo, contenido, asistentes } = req.body;
+    if (!grupoId || !titulo) {
+        return res.status(400).json({ message: 'Faltan campos: grupoId, titulo.' });
+    }
+    // El acta se crea a nombre del usuario autenticado; debe ser lider del grupo
+    const creadaPor = req.user.email;
+    const rolEnGrupo = await getUserGroupRole(creadaPor, grupoId);
+    if (req.user.role !== 'admin' && !['presidente', 'tesorero', 'secretario'].includes(rolEnGrupo)) {
+        return res.status(403).json({ message: 'Solo lideres del grupo pueden registrar actas.' });
     }
     try {
         const sheetsClient = await getSheetsClient();
@@ -1405,7 +1825,7 @@ app.post('/api/registrar-acta', async (req, res) => {
             valueInputOption: 'USER_ENTERED',
             resource: { values: [[
                 actaId, grupoId, new Date().toISOString(),
-                creadaPor, titulo, contenido || '', asistentes || ''
+                creadaPor, sanitizeCell(titulo), sanitizeCell(contenido), sanitizeCell(asistentes)
             ]] },
         });
         res.status(201).json({ message: 'Acta registrada correctamente.', actaId });
@@ -1418,6 +1838,7 @@ app.post('/api/registrar-acta', async (req, res) => {
 app.get('/api/actas-asamblea', async (req, res) => {
     const { groupId } = req.query;
     if (!groupId) return res.status(400).json({ message: 'groupId requerido.' });
+    if (!(await assertGroupMember(req, res, groupId))) return;
     try {
         const sheetsClient = await getSheetsClient();
         await ensureSheetExists('ActasAsamblea', [
@@ -1450,7 +1871,7 @@ app.get('/api/actas-asamblea', async (req, res) => {
 });
 
 // Endpoint para cambiar el rol de un usuario
-app.post('/api/cambiar-rol-usuario', async (req, res) => {
+app.post('/api/cambiar-rol-usuario', requireAdmin, async (req, res) => {
     const { Email, Role } = req.body || {};
     const normalizedEmail = normalize(Email);
     const normalizedRole = normalizeGlobalRole(Role);
@@ -1503,92 +1924,191 @@ app.post('/api/cambiar-rol-usuario', async (req, res) => {
 });
 
 // Endpoint para desactivar usuario (eliminar fila)
-app.post('/api/desactivar-usuario', async (req, res) => {
+// Asegura que la hoja Users tenga las columnas extendidas (Telefono, Cedula, Estado)
+async function ensureUsersExtendedHeader() {
+    const sheetsClient = await getSheetsClient();
+    const resp = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Users!1:1' });
+    const headers = (resp.data.values && resp.data.values[0]) || [];
+    const want = ['Username', 'Email', 'HashedPassword', 'Role', 'Balance', 'CreatedDate', 'Telefono', 'Cedula', 'Estado'];
+    const needs = want.some((h, i) => headers[i] !== h);
+    if (needs) {
+        const merged = want.map((h, i) => headers[i] || h);
+        await sheetsClient.spreadsheets.values.update({
+            spreadsheetId: SPREADSHEET_ID, range: 'Users!A1:I1', valueInputOption: 'RAW', resource: { values: [merged] },
+        });
+    }
+}
+
+// Actualiza el Estado (activo/inactivo) de un usuario por email. Baja logica reversible.
+async function setUserEstado(email, estado) {
+    await ensureUsersExtendedHeader();
+    const sheetsClient = await getSheetsClient();
+    const resp = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Users!A:I' });
+    const rows = resp.data.values || [];
+    const headers = rows[0] || [];
+    const emailCol = headers.findIndex(h => normalize(h) === 'email');
+    let estadoCol = headers.findIndex(h => normalize(h) === 'estado');
+    if (estadoCol === -1) estadoCol = 8;
+    const idx = rows.findIndex((r, i) => i > 0 && normalize(r[emailCol]) === normalize(email));
+    if (idx === -1) return { ok: false };
+    await sheetsClient.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `Users!${toColumnLetter(estadoCol + 1)}${idx + 1}`,
+        valueInputOption: 'RAW',
+        resource: { values: [[estado]] },
+    });
+    return { ok: true };
+}
+
+// Baja logica: marca el usuario como inactivo (reversible con /api/activar-usuario)
+app.post('/api/desactivar-usuario', requireAdmin, async (req, res) => {
     const { Email } = req.body;
     if (!Email) {
         return res.status(400).json({ message: 'Falta el Email.' });
     }
     try {
-        const sheetsClient = await getSheetsClient();
-        const response = await sheetsClient.spreadsheets.values.get({
-            spreadsheetId: SPREADSHEET_ID,
-            range: 'Users!A:F',
-        });
-        const rows = response.data.values || [];
-        if (rows.length < 2) {
-            return res.status(404).json({ message: 'Usuario no encontrado.' });
-        }
-        const headerRow = rows[0];
-        const emailCol = headerRow.findIndex(h => normalize(h) === 'email');
-        const userIndex = rows.findIndex((row, i) => i > 0 && normalize(row[emailCol]) === normalize(Email));
-        if (userIndex === -1) {
-            return res.status(404).json({ message: 'Usuario no encontrado.' });
-        }
-
-        const spreadsheetMeta = await sheetsClient.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
-        const usersSheet = (spreadsheetMeta.data.sheets || []).find((sheet) => sheet.properties?.title === 'Users');
-        if (!usersSheet) {
-            return res.status(500).json({ message: 'No se encontrÃ³ la hoja Users.' });
-        }
-
-        // Eliminar la fila (no la cabecera)
-        await sheetsClient.spreadsheets.batchUpdate({
-            spreadsheetId: SPREADSHEET_ID,
-            requestBody: {
-                requests: [{
-                    deleteDimension: {
-                        range: {
-                            sheetId: usersSheet.properties.sheetId,
-                            dimension: 'ROWS',
-                            startIndex: userIndex,
-                            endIndex: userIndex + 1
-                        }
-                    }
-                }]
-            }
-        });
-
-        // Limpiar vÃ­nculos del usuario en UserGroupLinks para evitar relaciones huÃ©rfanas.
-        const linksResp = await sheetsClient.spreadsheets.values.get({
-            spreadsheetId: SPREADSHEET_ID,
-            range: 'UserGroupLinks!A:E',
-        });
-        const linksRows = linksResp.data.values || [];
-        if (linksRows.length > 1) {
-            const filtered = [
-                linksRows[0],
-                ...linksRows.slice(1).filter((row) => normalize(row[0]) !== normalize(Email)),
-            ];
-            const lastColumn = toColumnLetter((filtered[0] || []).length || 5);
-            await sheetsClient.spreadsheets.values.clear({
-                spreadsheetId: SPREADSHEET_ID,
-                range: 'UserGroupLinks!A:E',
-            });
-            await sheetsClient.spreadsheets.values.update({
-                spreadsheetId: SPREADSHEET_ID,
-                range: `UserGroupLinks!A1:${lastColumn}${filtered.length}`,
-                valueInputOption: 'USER_ENTERED',
-                resource: { values: filtered },
-            });
-        }
-
+        const result = await setUserEstado(Email, 'inactivo');
+        if (!result.ok) return res.status(404).json({ message: 'Usuario no encontrado.' });
         res.json({ message: 'Usuario desactivado correctamente.' });
     } catch (error) {
         res.status(500).json({ message: 'Error al desactivar usuario.', error: error.message });
     }
 });
 
+// Reactivar usuario
+app.post('/api/activar-usuario', requireAdmin, async (req, res) => {
+    const { Email } = req.body;
+    if (!Email) {
+        return res.status(400).json({ message: 'Falta el Email.' });
+    }
+    try {
+        const result = await setUserEstado(Email, 'activo');
+        if (!result.ok) return res.status(404).json({ message: 'Usuario no encontrado.' });
+        res.json({ message: 'Usuario activado correctamente.' });
+    } catch (error) {
+        res.status(500).json({ message: 'Error al activar usuario.', error: error.message });
+    }
+});
+
+// Obtener los datos del propio perfil (incluye telefono/cedula/estado)
+app.get('/api/mi-perfil', async (req, res) => {
+    try {
+        await ensureUsersExtendedHeader();
+        const sheetsClient = await getSheetsClient();
+        const resp = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Users!A:I' });
+        const rows = resp.data.values || [];
+        const headers = rows[0] || [];
+        const col = (name) => headers.findIndex(h => normalize(h) === name);
+        const emailCol = col('email');
+        const row = rows.find((r, i) => i > 0 && normalize(r[emailCol]) === req.user.email);
+        if (!row) return res.status(404).json({ message: 'Usuario no encontrado.' });
+        const val = (name) => { const c = col(name); return c !== -1 ? (row[c] || '') : ''; };
+        return res.json({
+            success: true,
+            perfil: {
+                username: val('username'),
+                email: val('email'),
+                role: val('role'),
+                telefono: val('telefono'),
+                cedula: val('cedula'),
+                estado: (val('estado') || 'activo'),
+                createdDate: val('createddate'),
+                balance: Number(val('balance')) || 0,
+                Balance: Number(val('balance')) || 0,
+            },
+        });
+    } catch (error) {
+        console.error('[MI-PERFIL] Error:', error.message);
+        return res.status(500).json({ message: 'Error al obtener el perfil.' });
+    }
+});
+
+// Cambiar la propia contrasena (verifica la actual)
+app.post('/api/cambiar-contrasena', async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body || {};
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ message: 'Se requieren la contrasena actual y la nueva.' });
+        }
+        if (newPassword.toString().length < 6) {
+            return res.status(400).json({ message: 'La nueva contrasena debe tener al menos 6 caracteres.' });
+        }
+        await ensureUsersExtendedHeader();
+        const sheetsClient = await getSheetsClient();
+        const resp = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Users!A:I' });
+        const rows = resp.data.values || [];
+        const headers = rows[0] || [];
+        const emailCol = headers.findIndex(h => normalize(h) === 'email');
+        const passCol = headers.findIndex(h => normalize(h) === 'hashedpassword');
+        const idx = rows.findIndex((r, i) => i > 0 && normalize(r[emailCol]) === req.user.email);
+        if (idx === -1) return res.status(404).json({ message: 'Usuario no encontrado.' });
+        const currentHash = rows[idx][passCol] || '';
+        if (!bcrypt.compareSync(currentPassword, currentHash)) {
+            return res.status(401).json({ message: 'La contrasena actual es incorrecta.' });
+        }
+        const newHash = bcrypt.hashSync(newPassword.toString(), 10);
+        await sheetsClient.spreadsheets.values.update({
+            spreadsheetId: SPREADSHEET_ID,
+            range: `Users!${toColumnLetter(passCol + 1)}${idx + 1}`,
+            valueInputOption: 'RAW',
+            resource: { values: [[newHash]] },
+        });
+        return res.json({ success: true, message: 'Contrasena actualizada correctamente.' });
+    } catch (error) {
+        console.error('[CAMBIAR-CONTRASENA] Error:', error.message);
+        return res.status(500).json({ message: 'Error al cambiar la contrasena.' });
+    }
+});
+
+// Actualizar datos del propio perfil (un admin puede actualizar a otro pasando email)
+app.post('/api/actualizar-perfil', async (req, res) => {
+    try {
+        const targetEmail = (req.user.role === 'admin' && req.body.email)
+            ? normalize(req.body.email)
+            : req.user.email;
+        const { username, telefono, cedula } = req.body || {};
+        await ensureUsersExtendedHeader();
+        const sheetsClient = await getSheetsClient();
+        const resp = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Users!A:I' });
+        const rows = resp.data.values || [];
+        const headers = rows[0] || [];
+        const emailCol = headers.findIndex(h => normalize(h) === 'email');
+        const idx = rows.findIndex((r, i) => i > 0 && normalize(r[emailCol]) === targetEmail);
+        if (idx === -1) return res.status(404).json({ message: 'Usuario no encontrado.' });
+
+        const setCell = async (colName, value) => {
+            if (value === undefined) return;
+            const c = headers.findIndex(h => normalize(h) === colName);
+            if (c === -1) return;
+            await sheetsClient.spreadsheets.values.update({
+                spreadsheetId: SPREADSHEET_ID,
+                range: `Users!${toColumnLetter(c + 1)}${idx + 1}`,
+                valueInputOption: 'RAW',
+                resource: { values: [[value]] },
+            });
+        };
+        await setCell('username', username !== undefined ? username.toString().trim() : undefined);
+        await setCell('telefono', telefono !== undefined ? telefono.toString().trim() : undefined);
+        await setCell('cedula', cedula !== undefined ? cedula.toString().trim() : undefined);
+
+        return res.json({ success: true, message: 'Perfil actualizado correctamente.', data: { username, telefono, cedula } });
+    } catch (error) {
+        console.error('[ACTUALIZAR-PERFIL] Error:', error.message);
+        return res.status(500).json({ message: 'Error al actualizar el perfil.' });
+    }
+});
+
 // --- Endpoint para obtener todos los usuarios y sus roles/grupos (repara cabecera automÃ¡ticamente si es incorrecta) ---
-app.get('/api/obtener-usuarios', async (req, res) => {
+app.get('/api/obtener-usuarios', requireAdmin, async (req, res) => {
     try {
         const requiredHeaders = ['Username','Email','HashedPassword','Role','Balance','CreatedDate'];
         // 1) Inicializa el cliente (si no existe aÃºn)
         const sheetsClient = await getSheetsClient();
 
-        // 2) Ahora sÃ­ lee la hoja
+        // 2) Ahora sÃ­ lee la hoja (A:I incluye Telefono/Cedula/Estado)
         let response = await sheetsClient.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: 'Users!A:F',
+            range: 'Users!A:I',
         });
         let rows = response.data.values;
         // Si la cabecera no es la correcta, la repara automÃ¡ticamente
@@ -1602,7 +2122,7 @@ app.get('/api/obtener-usuarios', async (req, res) => {
             // Vuelve a leer despuÃ©s de reparar
             response = await sheetsClient.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
-                range: 'Users!A:F',
+                range: 'Users!A:I',
             });
             rows = response.data.values;
         }
@@ -1628,6 +2148,7 @@ app.get('/api/obtener-usuarios', async (req, res) => {
                 .filter(link => (link[0] || '').trim().toLowerCase() === Email.trim().toLowerCase())
                 .map(link => ({ nombre: link[1] || '', rol: link[3] || 'member' }));
             const normalizedRole = normalizeGlobalRole(row[3] || 'member');
+            const estado = (row[8] || 'activo').toString().trim().toLowerCase();
             return {
                 Username: row[0] || '',
                 Email: normalize(Email),
@@ -1635,9 +2156,13 @@ app.get('/api/obtener-usuarios', async (req, res) => {
                 role: normalizedRole,
                 Balance: row[4] || '',
                 CreatedDate: row[5] || '',
+                Telefono: row[6] || '',
+                Cedula: row[7] || '',
+                Estado: estado,
+                estado,
                 grupos,
                 Miembros: grupos,
-                isActive: true
+                isActive: estado !== 'inactivo'
             };
         });
         console.log('[OBTENER USUARIOS] Usuarios enviados al frontend:', usuarios);
@@ -1960,7 +2485,7 @@ const buildImportMessage = (summary, modeLabel) => (
     + `claves por defecto: ${summary.defaultedPasswords || 0}, errores: ${summary.failed}.`
 );
 
-app.post('/api/importar-usuarios-excel', upload.single('file'), async (req, res) => {
+app.post('/api/importar-usuarios-excel', requireAdmin, upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ message: 'No se subio ningun archivo.' });
@@ -1988,7 +2513,7 @@ app.post('/api/importar-usuarios-excel', upload.single('file'), async (req, res)
 });
 
 // Endpoint para importar usuarios y grupos desde Excel
-app.post('/api/importar-usuarios-grupos', upload.single('file'), async (req, res) => {
+app.post('/api/importar-usuarios-grupos', requireAdmin, upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ message: 'No se subio ningun archivo.' });
@@ -2026,6 +2551,7 @@ app.post('/api/cambiar-rol-usuario-grupo', async (req, res) => {
     if (!VALID_GROUP_ROLES.has(NewGroupRole)) {
         return res.status(400).json({ message: 'Rol de grupo invÃ¡lido.' });
     }
+    if (!(await assertGroupManager(req, res, GroupID))) return;
     try {
         const sheetsClient = await getSheetsClient();
         // 1. Verifica y corrige cabeceras de UserGroupLinks
@@ -2115,6 +2641,7 @@ app.post('/api/desvincular-usuario-grupo', async (req, res) => {
     if (!UserEmail || !GroupID) {
         return res.status(400).json({ message: 'Faltan datos: UserEmail y GroupID son requeridos.' });
     }
+    if (!(await assertGroupManager(req, res, (GroupID || '').toString().trim()))) return;
     try {
         const sheetsClient = await getSheetsClient();
         // Leer cabeceras
@@ -2169,6 +2696,97 @@ app.post('/api/desvincular-usuario-grupo', async (req, res) => {
     }
 });
 
+// Resumen admin: TODAS las transacciones en una sola lectura (totales correctos del panel)
+app.get('/api/admin/transacciones', requireAdmin, async (req, res) => {
+    try {
+        const sheetsClient = await getSheetsClient();
+        const resp = await sheetsClient.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: 'Transactions!A2:H',
+        });
+        const rows = resp.data.values || [];
+        const transacciones = rows
+            .filter((r) => (r[0] || r[1]))
+            .map((r) => ({
+                transactionId: r[0] || '',
+                userEmail: (r[1] || '').toString().trim().toLowerCase(),
+                UserEmail: r[1] || '',
+                type: r[2] || '',
+                Type: r[2] || '',
+                amount: Number(r[3] || 0),
+                Amount: Number(r[3] || 0),
+                description: r[4] || '',
+                date: r[5] || '',
+                Date: r[5] || '',
+                category: r[6] || '',
+                icon: r[7] || '',
+            }));
+        return res.json({ transacciones });
+    } catch (error) {
+        console.error('[ADMIN TRANSACCIONES] Error:', error.message);
+        if (isQuotaExceededError(error)) {
+            return res.status(200).json({ transacciones: [], warning: 'Limite temporal de lecturas alcanzado.' });
+        }
+        return res.status(500).json({ message: 'Error al obtener transacciones.', transacciones: [] });
+    }
+});
+
+// Resumen agregado para el panel admin: totales correctos leyendo las hojas reales una sola vez.
+// Esquemas reales: Savings[A=email,B=group,C=Amount,D=date,E=type], Acciones[A=email,B=group,C=date,D=Shares,E=ShareValue,F=InterestRate],
+// SolicitudesPrestamos[A=id,B=email,C=group,D=role,E=Monto,F=Estado], Users[...,I=Estado], Groups[A=GroupID]
+app.get('/api/admin/resumen', requireAdmin, async (req, res) => {
+    try {
+        const sheetsClient = await getSheetsClient();
+        const ranges = ['Savings!A2:F', 'Acciones!A2:G', 'SolicitudesPrestamos!A2:I', 'Users!A2:I', 'Groups!A2:A'];
+        const resp = await sheetsClient.spreadsheets.values.batchGet({ spreadsheetId: SPREADSHEET_ID, ranges });
+        const vr = resp.data.valueRanges || [];
+        const sav = vr[0]?.values || [];
+        const acc = vr[1]?.values || [];
+        const sol = vr[2]?.values || [];
+        const usr = vr[3]?.values || [];
+        const grp = vr[4]?.values || [];
+        const r2 = (x) => Math.round(x * 100) / 100;
+
+        const totalAhorros = sav.reduce((s, r) => s + parseMoney(r[2]), 0);
+        const totalAcciones = acc.reduce((s, r) => s + parseMoney(r[3]) * parseMoney(r[4]), 0);
+
+        let prestamosAprobados = 0, prestamosPendientes = 0, countAprob = 0, countPend = 0;
+        sol.forEach((r) => {
+            const estado = (r[5] || '').toString().trim().toLowerCase();
+            const monto = parseMoney(r[4]);
+            if (estado === 'aprobado') { prestamosAprobados += monto; countAprob++; }
+            else if (estado === 'pendiente') { prestamosPendientes += monto; countPend++; }
+        });
+
+        const totalUsuarios = usr.filter((r) => r[1]).length;
+        const usuariosActivos = usr.filter((r) => r[1] && (r[8] || 'activo').toString().trim().toLowerCase() !== 'inactivo').length;
+        const adminUsuarios = usr.filter((r) => normalizeGlobalRole(r[3]) === 'admin').length;
+        const totalGrupos = grp.filter((r) => r[0]).length;
+
+        return res.json({
+            resumen: {
+                totalAhorros: r2(totalAhorros),
+                totalAcciones: r2(totalAcciones),
+                prestamosAprobados: r2(prestamosAprobados),
+                prestamosPendientes: r2(prestamosPendientes),
+                countPrestamosAprobados: countAprob,
+                countPrestamosPendientes: countPend,
+                totalUsuarios,
+                usuariosActivos,
+                adminUsuarios,
+                totalGrupos,
+                patrimonioTotal: r2(totalAhorros + totalAcciones),
+            },
+        });
+    } catch (error) {
+        console.error('[ADMIN RESUMEN] Error:', error.message);
+        if (isQuotaExceededError(error)) {
+            return res.status(200).json({ resumen: null, warning: 'Limite temporal de lecturas alcanzado.' });
+        }
+        return res.status(500).json({ message: 'Error al obtener el resumen.', resumen: null });
+    }
+});
+
 // --- INICIO DEL SERVIDOR ---
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[BACKEND] Servidor escuchando en http://localhost:${PORT} (y en todas las interfaces de red)`);
@@ -2183,13 +2801,18 @@ app.get('/api/obtener-grupos', async (req, res) => {
     const headers = await groupsService.getGroupsHeaders();
     // Leer filas de datos
     const gruposRaw = await groupsService.listAllGroups();
-    const grupos = gruposRaw.map(row => {
+    let grupos = gruposRaw.map(row => {
       const obj = {};
       headers.forEach((h, i) => {
         obj[h] = row[i] || '';
       });
       return obj;
     });
+    // Un no-admin solo ve los grupos a los que pertenece (aislamiento)
+    if (req.user && req.user.role !== 'admin') {
+      const misGrupos = await getUserGroupIds(req.user.email);
+      grupos = grupos.filter((g) => misGrupos.has((g.GroupID || g.groupId || g.id || '').toString().trim()));
+    }
     res.json({ grupos });
   } catch (error) {
     console.error('Error al leer grupos de Google Sheets:', error.message);
@@ -2221,7 +2844,7 @@ app.use((req, res, next) => {
 });
 
 // --- Endpoint para obtener actividad reciente (usuarios, grupos, prÃ©stamos, depÃ³sitos) ---
-app.get('/api/actividad-reciente', async (req, res) => {
+app.get('/api/actividad-reciente', requireAdmin, async (req, res) => {
   try {
     // 1. Leer usuarios (solo los Ãºltimos 5)
     let users = [];
@@ -2307,6 +2930,8 @@ app.post('/api/actualizar-grupo-en-sheet', async (req, res) => {
   if (!group || (!group.GroupID && !group.id)) {
     return res.status(400).json({ message: 'Falta el identificador del grupo (GroupID o id).' });
   }
+  // Admin global o gestor (presidente/tesorero) del grupo pueden configurar
+  if (!(await assertGroupManager(req, res, (group.GroupID || group.id || '').toString().trim()))) return;
   try {
     // Normalizar el identificador
     if (!group.GroupID && group.id) group.GroupID = group.id;
@@ -2320,8 +2945,11 @@ app.post('/api/actualizar-grupo-en-sheet', async (req, res) => {
 
 // Endpoint para obtener transacciones de un usuario especÃ­fico
 app.get('/api/obtener-transacciones', async (req, res) => {
-  const { userEmail } = req.query;
-  
+  // Identidad desde el token: un usuario solo ve sus transacciones; un admin puede consultar cualquiera
+  const userEmail = req.user.role === 'admin'
+    ? (req.query.userEmail || req.user.email)
+    : req.user.email;
+
   if (!userEmail) {
     return res.status(400).json({ message: 'Se requiere el parÃ¡metro userEmail' });
   }
@@ -2385,25 +3013,51 @@ const paymentUpload = multer({
 // Endpoint para subir pagos con evidencia fotogrÃ¡fica
 app.post('/api/upload-payment', paymentUpload.single('paymentImage'), async (req, res) => {
   try {
-    const { userEmail, loanId, amount, paymentDate, description, status } = req.body;
-    
+    const { loanId, amount, paymentDate, description, status } = req.body;
+    const userEmail = selfEmail(req, req.body.userEmail); // el pago se sube a nombre del usuario autenticado
+
     if (!userEmail || !loanId || !amount || !paymentDate || !req.file) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Faltan campos requeridos: userEmail, loanId, amount, paymentDate, paymentImage' 
+      return res.status(400).json({
+        success: false,
+        message: 'Faltan campos requeridos: loanId, amount, paymentDate, paymentImage'
       });
     }
 
     // Validar que el monto sea vÃ¡lido
-    if (isNaN(Number(amount)) || Number(amount) <= 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'El monto debe ser un nÃºmero vÃ¡lido mayor a 0' 
+    const montoPago = parseMoney(amount);
+    if (!Number.isFinite(montoPago) || montoPago <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'El monto debe ser un nÃºmero vÃ¡lido mayor a 0'
       });
     }
 
     const sheets = await getSheetsClient();
-    
+
+    // El prestamo debe pertenecer a un grupo del usuario (salvo admin) — evita pagar prestamos ajenos (IDOR)
+    if (req.user.role !== 'admin') {
+      const loanGroupMap = await getLoanGroupMap();
+      const loanGroup = loanGroupMap.get((loanId || '').toString().trim()) || '';
+      const userGroups = await getUserGroupIds(userEmail);
+      if (!loanGroup || !userGroups.has(loanGroup)) {
+        return res.status(403).json({ success: false, message: 'No puedes registrar pagos de este prestamo.' });
+      }
+    }
+
+    // Tope de sobrepago: no permitir pagar mas que el saldo pendiente del prestamo
+    try {
+      const loansResp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Loans!A:J' });
+      const lrow = (loansResp.data.values || []).find(r => (r[0] || '').toString().trim() === (loanId || '').toString().trim());
+      if (lrow) {
+        const total = parseMoney(lrow[9]) || parseMoney(lrow[3]);
+        const pagado = await getApprovedPaymentsTotal(loanId);
+        const saldo = Math.round((total - pagado) * 100) / 100;
+        if (total > 0 && montoPago > saldo + 0.01) {
+          return res.status(400).json({ success: false, message: `El pago ($${montoPago}) supera el saldo pendiente ($${saldo}).` });
+        }
+      }
+    } catch (e) { /* si no se puede leer, se permite (no bloquear por error de lectura) */ }
+
     // Generar ID Ãºnico para el pago
     const paymentId = 'PAY_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
     
@@ -2500,14 +3154,9 @@ app.post('/api/upload-payment', paymentUpload.single('paymentImage'), async (req
 // Endpoint para obtener pagos pendientes de aprobaciÃ³n (para administradores)
 app.get('/api/pending-payments', async (req, res) => {
   try {
-    const { groupId, adminEmail } = req.query;
-    if (!adminEmail) {
-      return res.status(400).json({
-        success: false,
-        message: 'adminEmail es requerido'
-      });
-    }
-    
+    const { groupId } = req.query;
+    const adminEmail = req.user.email; // identidad desde el token, no del cliente
+
     const sheets = await getSheetsClient();
     const managedGroupIds = await getUserManagedGroupIds(adminEmail);
 
@@ -2590,7 +3239,7 @@ app.get('/api/pending-payments', async (req, res) => {
 // Endpoint para listar pagos de prÃƒÂ©stamos del usuario con aislamiento por grupo
 app.get('/api/user-loan-payments', async (req, res) => {
   try {
-    const normalizedUserEmail = normalizeEmailKey(req.query.userEmail);
+    const normalizedUserEmail = normalizeEmailKey(selfEmail(req, req.query.userEmail));
     const normalizedGroupId = normalizeGroupKey(req.query.groupId);
 
     if (!normalizedUserEmail) {
@@ -2681,9 +3330,16 @@ app.get('/api/user-loan-payments', async (req, res) => {
 });
 
 app.get('/api/payment-image/:filename', (req, res) => {
-  const { filename } = req.params;
-  const imagePath = path.join(__dirname, 'uploads', 'payments', filename);
-  
+  // Sanitizar: path.basename elimina cualquier ../ y previene path traversal
+  const filename = path.basename(req.params.filename || '');
+  const baseDir = path.join(__dirname, 'uploads', 'payments');
+  const imagePath = path.join(baseDir, filename);
+
+  // Defensa adicional: el archivo resuelto debe quedar dentro de baseDir
+  if (!filename || !imagePath.startsWith(baseDir)) {
+    return res.status(400).json({ success: false, message: 'Nombre de archivo invalido' });
+  }
+
   // Verificar que el archivo existe
   if (!fs.existsSync(imagePath)) {
     return res.status(404).json({ success: false, message: 'Imagen no encontrada' });
@@ -2697,16 +3353,17 @@ app.get('/api/payment-image/:filename', (req, res) => {
 app.get('/api/group-info/:groupId', async (req, res) => {
   try {
     const { groupId } = req.params;
-    
+
     if (!groupId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'GroupId es requerido' 
+      return res.status(400).json({
+        success: false,
+        message: 'GroupId es requerido'
       });
     }
+    if (!(await assertGroupMember(req, res, groupId))) return;
 
     const sheets = await getSheetsClient();
-    
+
     // Obtener informaciÃ³n del grupo
     const headerResp = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
@@ -2767,13 +3424,14 @@ app.get('/api/group-info/:groupId', async (req, res) => {
 app.get('/api/group-admins/:groupId', async (req, res) => {
   try {
     const { groupId } = req.params;
-    
+
     if (!groupId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'GroupId es requerido' 
+      return res.status(400).json({
+        success: false,
+        message: 'GroupId es requerido'
       });
     }
+    if (!(await assertGroupMember(req, res, groupId))) return;
 
     const sheets = await getSheetsClient();
     
@@ -2815,14 +3473,9 @@ app.get('/api/group-admins/:groupId', async (req, res) => {
 // Endpoint para obtener solicitudes de prÃ©stamos pendientes para administradores
 app.get('/api/pending-loan-requests', async (req, res) => {
   try {
-    const { adminEmail, groupId } = req.query;
-    if (!adminEmail) {
-      return res.status(400).json({
-        success: false,
-        message: 'adminEmail es requerido'
-      });
-    }
-    
+    const { groupId } = req.query;
+    const adminEmail = req.user.email; // identidad desde el token, no del cliente
+
     const sheets = await getSheetsClient();
     const managedGroupIds = await getUserManagedGroupIds(adminEmail);
 
@@ -2904,12 +3557,13 @@ app.get('/api/pending-loan-requests', async (req, res) => {
 // Endpoint para aprobar/rechazar solicitudes de prÃ©stamos
 app.post('/api/approve-loan-request', async (req, res) => {
   try {
-    const { loanId, action, adminEmail, notes } = req.body; // action: 'approve' or 'reject'
-    
-    if (!loanId || !action || !adminEmail) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Faltan parÃ¡metros requeridos: loanId, action, adminEmail' 
+    const { loanId, action, notes } = req.body; // action: 'approve' or 'reject'
+    const adminEmail = req.user.email; // identidad desde el token, no del cliente
+
+    if (!loanId || !action) {
+      return res.status(400).json({
+        success: false,
+        message: 'Faltan parÃ¡metros requeridos: loanId, action'
       });
     }
 
@@ -2957,6 +3611,10 @@ app.post('/api/approve-loan-request', async (req, res) => {
       });
     }
     
+    // Preservar el Detalles original (contiene "Plazo: N"); las notas se anexan, no se sobreescriben
+    const detallesOriginal = (loanData[7] || '').toString();
+    const detallesActualizado = notes ? `${detallesOriginal} | Nota: ${notes}` : detallesOriginal;
+
     // Actualizar el status y aprobador
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
@@ -2964,22 +3622,40 @@ app.post('/api/approve-loan-request', async (req, res) => {
       valueInputOption: 'RAW',
       requestBody: {
         values: [[
-          newStatus,           // Status (F)
-          loanData[6] || '',   // Date (G) - mantener
-          notes || '',         // Detalles (H) - actualizar con notas
-          adminEmail           // AprobadoPor (I)
+          newStatus,             // Status (F)
+          loanData[6] || '',     // Date (G) - mantener
+          detallesActualizado,   // Detalles (H) - preserva Plazo y anexa nota
+          adminEmail             // AprobadoPor (I)
         ]]
       }
     });
 
-    // Si se aprueba, crear la transacciÃ³n de prÃ©stamo
+    // Si se aprueba: calcular interes, persistir en Loans y registrar la transaccion (principal)
     if (action === 'approve') {
+      const principal = parseMoney(loanData[4]);
+      const term = parsePlazo(loanData[7]);
+      const monthlyRate = await getGroupMonthlyRate(loanGroupId); // % mensual
+      const totalConInteres = Math.round(principal * (1 + (monthlyRate / 100) * term) * 100) / 100;
+      const startDate = new Date().toISOString();
+      const dueDate = (() => { try { const d = new Date(); d.setMonth(d.getMonth() + term); return d.toISOString(); } catch { return ''; } })();
+
+      // Persistir el prestamo aprobado en la hoja Loans (A-J):
+      // LoanID, UserEmail, GroupID, AmountApproved(principal), StartDate, DueDate, InterestRate(mensual), Status, Term, Total
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: 'Loans!A:J',
+        valueInputOption: 'RAW',
+        requestBody: {
+          values: [[loanId, loanData[1], loanGroupId, principal, startDate, dueDate, monthlyRate, 'aprobado', term, totalConInteres]]
+        }
+      });
+
       const transactionData = [
         Date.now().toString(),    // TransactionID
         loanData[1],             // UserEmail
         'loan',                  // Type
-        Number(loanData[4]),     // Amount
-        `PrÃ©stamo aprobado - ${notes || ''}`, // Description
+        principal,               // Amount (se entrega el principal)
+        `PrÃ©stamo aprobado (plazo ${term}m, ${monthlyRate}%/mes, total $${totalConInteres})`, // Description
         new Date().toISOString(), // Date
         'loan',                  // Category
         ''                         // Icon
@@ -3016,12 +3692,13 @@ app.post('/api/approve-loan-request', async (req, res) => {
 // Endpoint para aprobar/rechazar pagos (solo para administradores)
 app.post('/api/approve-payment', async (req, res) => {
   try {
-    const { paymentId, action, adminEmail, notes } = req.body; // action: 'approve' or 'reject'
-    
-    if (!paymentId || !action || !adminEmail) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Faltan parÃ¡metros requeridos: paymentId, action, adminEmail' 
+    const { paymentId, action, notes } = req.body; // action: 'approve' or 'reject'
+    const adminEmail = req.user.email; // identidad desde el token, no del cliente
+
+    if (!paymentId || !action) {
+      return res.status(400).json({
+        success: false,
+        message: 'Faltan parÃ¡metros requeridos: paymentId, action'
       });
     }
 
@@ -3119,8 +3796,9 @@ const savingsService = require('./services/savingsService');
 // POST /api/savings - Agregar nuevo ahorro
 app.post('/api/savings', async (req, res) => {
   try {
-    const { email, groupId, tipo, monto, descripcion, meta } = req.body;
-    
+    const { groupId, tipo, monto, descripcion, meta } = req.body;
+    const email = selfEmail(req, req.body.email); // se registra siempre a nombre del usuario autenticado
+
     const montoIsMissing = monto === undefined || monto === null || `${monto}`.trim() === '';
     if (!email || !groupId || !tipo || montoIsMissing) {
       return res.status(400).json({ 
@@ -3130,11 +3808,14 @@ app.post('/api/savings', async (req, res) => {
     }
 
     if (isNaN(Number(monto)) || Number(monto) <= 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'El monto debe ser un nÃºmero vÃ¡lido mayor a 0' 
+      return res.status(400).json({
+        success: false,
+        message: 'El monto debe ser un nÃºmero vÃ¡lido mayor a 0'
       });
     }
+
+    // El usuario debe pertenecer al grupo donde registra el ahorro
+    if (!(await assertGroupMember(req, res, groupId))) return;
 
     const result = await savingsService.addSaving(SPREADSHEET_ID, {
       email,
@@ -3165,7 +3846,8 @@ app.post('/api/savings', async (req, res) => {
 // GET /api/savings - Obtener ahorros por usuario
 app.get('/api/savings', async (req, res) => {
   try {
-    const { email, groupId } = req.query;
+    const { groupId } = req.query;
+    const email = selfEmail(req, req.query.email);
     
     if (!email) {
       return res.status(400).json({ 
@@ -3202,7 +3884,8 @@ app.get('/api/savings', async (req, res) => {
 // GET /api/savings/stats - Obtener estadÃ­sticas completas (ahorros + acciones)
 app.get('/api/savings/stats', async (req, res) => {
   try {
-    const { email, groupId } = req.query;
+    const { groupId } = req.query;
+    const email = selfEmail(req, req.query.email);
     
     if (!email) {
       return res.status(400).json({ 
@@ -3339,8 +4022,11 @@ function calcularUtilidadesProgresivas(acciones) {
       if (lote.mesCompra < mesActual) {
         const mesesTranscurridos = calcularMesesEntre(lote.fechaCompra, fechaIteracion);
         lote.mesesDevengados = Math.max(0, mesesTranscurridos - 1); // -1 porque empieza mes siguiente
-        
-        // Base actual del lote (con capitalizacion: lote.valorInversion;
+
+        // Base actual del lote: con capitalizacion suma el interes acumulado; sin ella usa la inversion
+        const baseLote = CONFIG.capitalizaMensual
+          ? (lote.valorInversion + lote.interesAcumulado)
+          : lote.valorInversion;
         baseDevengable += baseLote;
         lotesActivos++;
         
@@ -3451,7 +4137,7 @@ function calcularMesesEntre(fechaInicio, fechaFin) {
 // GET /api/savings/complete - Obtener resumen completo del patrimonio
 app.get('/api/savings/complete', async (req, res) => {
   try {
-    const normalizedEmail = normalizeEmailKey(req.query.email);
+    const normalizedEmail = normalizeEmailKey(selfEmail(req, req.query.email));
     const normalizedGroupId = normalizeGroupKey(req.query.groupId);
     console.log(`[SAVINGS COMPLETE] Iniciando para email: ${normalizedEmail}, groupId: ${normalizedGroupId}`);
     
@@ -3516,7 +4202,7 @@ app.get('/api/savings/complete', async (req, res) => {
           })
           .map(row => ({
             fecha: row[dateIndex] || '',
-            monto: Number(row[amountIndex]) || 0,
+            monto: parseMoney(row[amountIndex]),
             tipo: row[typeIndex] || 'mensual',
             descripcion: row[6] || ''
           }));
@@ -3565,10 +4251,10 @@ app.get('/api/savings/complete', async (req, res) => {
           ))
           .map(row => ({
             fecha: row[dateIndex] || '',
-            cantidad: Number(row[sharesIndex]) || 0,
-            valorAccion: Number(row[valueIndex]) || 0,
-            tasaInteres: Number(row[5]) || 0,
-            total: (Number(row[sharesIndex]) || 0) * (Number(row[valueIndex]) || 0)
+            cantidad: parseMoney(row[sharesIndex]),
+            valorAccion: parseMoney(row[valueIndex]),
+            tasaInteres: parseMoney(row[5]),
+            total: parseMoney(row[sharesIndex]) * parseMoney(row[valueIndex])
           }));
 
         // Calcular intereses con sistema normativo de cooperativa
@@ -3662,7 +4348,8 @@ app.get('/api/savings/complete', async (req, res) => {
 // GET /api/savings/audit - Obtener auditorÃ­a detallada del sistema normativo de intereses
 app.get('/api/savings/audit', async (req, res) => {
   try {
-    const { email, groupId } = req.query;
+    const { groupId } = req.query;
+    const email = selfEmail(req, req.query.email);
     console.log(`[SAVINGS AUDIT] Generando auditorÃ­a para email: ${email}, groupId: ${groupId}`);
     
     if (!email) {
@@ -3690,18 +4377,18 @@ app.get('/api/savings/audit', async (req, res) => {
       });
     }
 
-    // Filtrar acciones del usuario
+    // Acciones real: A=email(0), B=group(1), C=date(2), D=Shares(3), E=ShareValue(4), F=InterestRate(5)
     const accionesFiltradas = accionesRows.slice(1)
       .filter(row => {
-        const emailMatch = row[0] === email;
-        const groupMatch = !groupId || row[1] === groupId;
-        return emailMatch && groupMatch && row[2] && Number(row[2]) > 0;
+        const emailMatch = normalizeEmailKey(row[0]) === normalizeEmailKey(email);
+        const groupMatch = !groupId || normalizeGroupKey(row[1]) === normalizeGroupKey(groupId);
+        return emailMatch && groupMatch && parseMoney(row[3]) > 0;
       })
       .map(row => ({
-        fecha: row[4] || '',
-        cantidad: Number(row[2]) || 0,
-        valorAccion: Number(row[3]) || 0,
-        tasaInteres: Number(row[5]) || 0
+        fecha: row[2] || '',
+        cantidad: parseMoney(row[3]),
+        valorAccion: parseMoney(row[4]),
+        tasaInteres: parseMoney(row[5])
       }));
 
     if (accionesFiltradas.length === 0) {
@@ -3764,17 +4451,17 @@ app.get('/api/savings/audit', async (req, res) => {
 // POST /api/savings/goals - Crear nueva meta de ahorro
 app.post('/api/savings/goals', async (req, res) => {
   try {
-    const { 
-      email, 
-      groupId, 
-      nombre, 
-      montoObjetivo, 
-      fechaObjetivo, 
-      descripcion, 
-      prioridad, 
-      categoria 
+    const {
+      groupId,
+      nombre,
+      montoObjetivo,
+      fechaObjetivo,
+      descripcion,
+      prioridad,
+      categoria
     } = req.body;
-    
+    const email = selfEmail(req, req.body.email); // la meta se crea a nombre del usuario autenticado
+
     const montoObjetivoIsMissing = montoObjetivo === undefined || montoObjetivo === null || `${montoObjetivo}`.trim() === '';
     if (!email || !groupId || !nombre || montoObjetivoIsMissing || !fechaObjetivo) {
       return res.status(400).json({ 
@@ -3784,11 +4471,14 @@ app.post('/api/savings/goals', async (req, res) => {
     }
 
     if (isNaN(Number(montoObjetivo)) || Number(montoObjetivo) <= 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'El monto objetivo debe ser un nÃºmero vÃ¡lido mayor a 0' 
+      return res.status(400).json({
+        success: false,
+        message: 'El monto objetivo debe ser un nÃºmero vÃ¡lido mayor a 0'
       });
     }
+
+    // El usuario debe pertenecer al grupo donde crea la meta
+    if (!(await assertGroupMember(req, res, groupId))) return;
 
     const result = await savingsService.addSavingGoal(SPREADSHEET_ID, {
       email,
@@ -3821,7 +4511,8 @@ app.post('/api/savings/goals', async (req, res) => {
 // GET /api/savings/goals - Obtener metas de ahorro por usuario
 app.get('/api/savings/goals', async (req, res) => {
   try {
-    const { email, groupId } = req.query;
+    const { groupId } = req.query;
+    const email = selfEmail(req, req.query.email);
     
     if (!email) {
       return res.status(400).json({ 
@@ -3869,11 +4560,13 @@ app.put('/api/savings/goals/:goalId', async (req, res) => {
     }
 
     if (isNaN(Number(nuevoMonto)) || Number(nuevoMonto) < 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'El nuevo monto debe ser un nÃºmero vÃ¡lido mayor o igual a 0' 
+      return res.status(400).json({
+        success: false,
+        message: 'El nuevo monto debe ser un nÃºmero vÃ¡lido mayor o igual a 0'
       });
     }
+
+    if (!(await assertGoalOwner(req, res, goalId))) return;
 
     const result = await savingsService.updateGoalProgress(SPREADSHEET_ID, goalId, Number(nuevoMonto));
     
@@ -3908,11 +4601,13 @@ app.delete('/api/savings/goals/:goalId', async (req, res) => {
     const { goalId } = req.params;
     
     if (!goalId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Se requiere goalId' 
+      return res.status(400).json({
+        success: false,
+        message: 'Se requiere goalId'
       });
     }
+
+    if (!(await assertGoalOwner(req, res, goalId))) return;
 
     const result = await savingsService.deleteGoal(SPREADSHEET_ID, goalId);
     
