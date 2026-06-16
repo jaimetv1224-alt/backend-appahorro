@@ -2,6 +2,17 @@ const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 
+// Parser de dinero tolerante a locale es-EC: "137,37" -> 137.37, "1.234,56" -> 1234.56
+function toMoney(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  let s = (value == null ? '' : value).toString().trim().replace(/\s/g, '').replace(/[^\d.,-]/g, '');
+  if (!s) return 0;
+  if (s.includes('.') && s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (s.includes(',')) s = s.replace(',', '.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
 class SavingsService {
   constructor() {
     this.auth = null;
@@ -213,29 +224,27 @@ class SavingsService {
       
       const savingId = `SAV_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const fecha = new Date().toISOString();
-      
+
+      // Hoja canonica: Savings con convencion posicional A=email,B=group,C=amount,D=date,E=type,F=descripcion
+      // (coincide con savings/complete y los datos existentes). Asi el ahorro SI se refleja en el patrimonio.
       const values = [
-        savingId,
         email,
         groupId,
-        tipo,
-        Number(monto),
-        descripcion || '',
-        fecha.split('T')[0], // Solo la fecha
-        meta || '',
-        'Activo',
-        fecha
+        toMoney(monto),
+        fecha.split('T')[0], // Solo la fecha (D=Date)
+        tipo || 'mensual',   // E=Type
+        descripcion || ''    // F=Description
       ];
-      
-      const response = await this.sheets.spreadsheets.values.append({
+
+      await this.sheets.spreadsheets.values.append({
         spreadsheetId: spreadsheetId,
-        range: 'Ahorros!A:J',
+        range: 'Savings!A:F',
         valueInputOption: 'RAW',
         resource: {
           values: [values]
         }
       });
-      
+
       return {
         success: true,
         savingId: savingId,
@@ -258,43 +267,31 @@ class SavingsService {
       
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: spreadsheetId,
-        range: 'Savings!A:J'
+        range: 'Savings!A:F'
       });
-      
+
       const rows = response.data.values || [];
       console.log(`[SAVINGS SERVICE] Obtenidos ${rows.length} filas de Savings para ${email}`);
-      
+
       if (rows.length <= 1) {
         console.log('[SAVINGS SERVICE] No hay datos de ahorros (solo headers o vacío)');
         return [];
       }
-      
-      const headers = rows[0];
-      const savings = rows.slice(1).map(row => {
-        const saving = {};
-        headers.forEach((header, index) => {
-          saving[header] = row[index] || '';
-        });
-        return saving;
-      });
-      
-      // Filtrar por usuario y grupo si se especifica
-      let filteredSavings = savings.filter(saving => saving.Email === email);
-      
-      if (groupId) {
-        filteredSavings = filteredSavings.filter(saving => saving.GroupID === groupId);
-      }
-      
-      return filteredSavings.map(saving => ({
-        id: saving.ID,
-        tipo: saving.Tipo,
-        monto: Number(saving.Monto) || 0,
-        descripcion: saving.Descripcion,
-        fecha: saving.Fecha,
-        meta: saving.Meta,
-        estado: saving.Estado,
-        fechaCreacion: saving.FechaCreacion
-      }));
+
+      // Lectura POSICIONAL: A=email, B=group, C=amount, D=date, E=type, F=descripcion
+      const norm = (v) => (v || '').toString().trim().toLowerCase();
+      const targetEmail = norm(email);
+      const targetGroup = (groupId || '').toString().trim();
+
+      return rows.slice(1)
+        .filter((row) => norm(row[0]) === targetEmail && (!targetGroup || (row[1] || '').toString().trim() === targetGroup))
+        .map((row) => ({
+          tipo: row[4] || 'mensual',
+          monto: toMoney(row[2]),
+          descripcion: row[5] || '',
+          fecha: row[3] || '',
+          estado: 'Activo'
+        }));
     } catch (error) {
       console.error('Error obteniendo ahorros:', error);
       throw error;
@@ -538,7 +535,7 @@ class SavingsService {
         success: true,
         nuevoMonto: nuevoMonto,
         estado: newStatus,
-        progreso: (nuevoMonto / targetAmount) * 100
+        progreso: targetAmount > 0 ? (nuevoMonto / targetAmount) * 100 : 0
       };
     } catch (error) {
       console.error('Error actualizando progreso de meta:', error);
@@ -616,24 +613,27 @@ class SavingsService {
         return share;
       });
       
-      // Filtrar por usuario y grupo si se especifica
-      let filteredShares = shares.filter(share => 
-        (share.UserEmail || share.Email) === email
-      );
-      
-      if (groupId) {
-        filteredShares = filteredShares.filter(share => 
-          (share.GroupID || share.Group) === groupId
-        );
+      // Filtrar por usuario y grupo (sin distinguir mayúsculas/espacios)
+      const norm = (v) => (v || '').toString().trim().toLowerCase();
+      const targetEmail = norm(email);
+      const targetGroup = (groupId || '').toString().trim();
+      let filteredShares = shares.filter(share => norm(share.UserEmail || share.Email) === targetEmail);
+
+      if (targetGroup) {
+        filteredShares = filteredShares.filter(share => (share.GroupID || share.Group || '').toString().trim() === targetGroup);
       }
-      
-      return filteredShares.map(share => ({
-        fecha: share.Date || share.Fecha,
-        cantidad: Number(share.Shares || share.CantidadAcciones) || 0,
-        valorAccion: Number(share.ShareValue || share.ValorAccion) || 0,
-        tasaInteres: Number(share.InterestRate || share.TasaInteres) || 0,
-        total: (Number(share.Shares || share.CantidadAcciones) || 0) * (Number(share.ShareValue || share.ValorAccion) || 0)
-      }));
+
+      return filteredShares.map(share => {
+        const cantidad = toMoney(share.Shares || share.CantidadAcciones);
+        const valorAccion = toMoney(share.ShareValue || share.ValorAccion);
+        return {
+          fecha: share.Date || share.Fecha,
+          cantidad,
+          valorAccion,
+          tasaInteres: toMoney(share.InterestRate || share.TasaInteres),
+          total: cantidad * valorAccion
+        };
+      });
     } catch (error) {
       console.error('Error obteniendo acciones del usuario:', error);
       return [];
