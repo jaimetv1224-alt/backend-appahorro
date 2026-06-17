@@ -677,16 +677,184 @@ app.post('/api/registrar-usuario-en-sheet', async (req, res) => {
 // Endpoint para crear un grupo (mejorado)
 // Refactor: Usar groupsService y auditLogService
 // const groupsService = require('./services/groupsService');
-app.post('/api/crear-grupo-en-sheet', requireAdmin, async (req, res) => {
+// ===================== AUTOGESTION DE GRUPOS (helpers) =====================
+const GROUP_LEADER_ROLES = new Set(['presidente', 'tesorero', 'secretario']);
+const MAX_GROUPS_PER_USER = 2;
+const INVITATIONS_HEADERS = ['InvitationID', 'GroupID', 'InvitedEmail', 'InvitedBy', 'ProposedRole', 'Tipo', 'Status', 'CreatedAt', 'RespondedAt', 'ExpiresAt'];
+
+async function readUserGroupLinks() {
+    const sheetsClient = await getSheetsClient();
+    const resp = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'UserGroupLinks!A2:F' });
+    return resp.data.values || [];
+}
+// Un vínculo cuenta como activo salvo que su Estado (col E) sea 'inactivo'. Filas viejas sin col E = activas.
+const linkIsActive = (row) => (row[4] || 'activo').toString().trim().toLowerCase() !== 'inactivo';
+
+async function countActivePresidencies(email) {
+    const e = normalizeEmailKey(email);
+    return (await readUserGroupLinks()).filter(r => normalizeEmailKey(r[0]) === e && normalizeGroupRole(r[3]) === 'presidente' && linkIsActive(r)).length;
+}
+async function getActiveLeaderCount(groupId) {
+    const g = normalizeGroupKey(groupId);
+    return (await readUserGroupLinks()).filter(r => normalizeGroupKey(r[1]) === g && GROUP_LEADER_ROLES.has(normalizeGroupRole(r[3])) && linkIsActive(r)).length;
+}
+async function roleHolderEmail(groupId, role) {
+    const g = normalizeGroupKey(groupId), rr = normalizeGroupRole(role);
+    const found = (await readUserGroupLinks()).find(r => normalizeGroupKey(r[1]) === g && normalizeGroupRole(r[3]) === rr && linkIsActive(r));
+    return found ? normalizeEmailKey(found[0]) : '';
+}
+async function ensureInvitationsSheet() {
+    await ensureSheetExists('Invitations', INVITATIONS_HEADERS, await getSheetsClient(), SPREADSHEET_ID);
+}
+async function readInvitations() {
+    await ensureInvitationsSheet();
+    const sheetsClient = await getSheetsClient();
+    const resp = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Invitations!A2:J' });
+    return resp.data.values || [];
+}
+const newId = (p) => `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+// Cualquier usuario autenticado crea grupos (máx 2 presidencias activas). El creador queda como presidente activo.
+app.post('/api/crear-grupo-en-sheet', async (req, res) => {
     try {
-        const group = req.body;
-        if (!group.GroupName || !group.CreatedBy) {
-            return res.status(400).json({ message: 'Faltan datos del grupo. Se requieren: GroupName, CreatedBy.' });
+        const group = req.body || {};
+        if (!group.GroupName) {
+            return res.status(400).json({ message: 'Falta el nombre del grupo (GroupName).' });
         }
+        const creador = req.user.email;
+        if (req.user.role !== 'admin') {
+            const n = await countActivePresidencies(creador);
+            if (n >= MAX_GROUPS_PER_USER) {
+                return res.status(409).json({ message: `Límite alcanzado: solo puedes crear ${MAX_GROUPS_PER_USER} grupos.` });
+            }
+        }
+        // El servidor fuerza creador y presidente (no se confía en el body)
+        group.CreatedBy = creador;
+        group.Presidente = creador;
         const created = await groupsService.createGroup(group);
-        res.status(201).json({ message: 'Grupo creado en Google Sheet con Ã©xito.', data: created });
+        const newGroupId = Array.isArray(created) ? (created[0] || '') : (created.GroupID || group.GroupID || '');
+        // Vincular al creador como presidente activo (atómico a nivel de flujo)
+        if (newGroupId) {
+            await createUserGroupLink({ UserEmail: creador, GroupID: newGroupId, JoinDate: new Date().toISOString(), GroupRole: 'presidente', InvitedBy: 'self' });
+        }
+        res.status(201).json({ message: 'Grupo creado correctamente.', data: created, groupId: newGroupId });
     } catch (error) {
-        res.status(500).json({ message: 'Error al crear grupo en Sheet.', error: error.message });
+        console.error('[CREAR-GRUPO] Error:', error.message);
+        res.status(500).json({ message: 'Error al crear grupo.', error: error.message });
+    }
+});
+
+// Invitar a un usuario YA registrado al grupo (solo gestor: presidente/tesorero). Crea invitación PENDIENTE (no vincula aún).
+app.post('/api/invitar-miembro', async (req, res) => {
+    try {
+        const groupId = (req.body?.groupId || req.body?.GroupID || '').toString().trim();
+        const invitedEmail = normalizeEmailKey(req.body?.email || req.body?.InvitedEmail);
+        const proposedRole = normalizeGroupRole(req.body?.role || 'member');
+        if (!groupId || !invitedEmail) return res.status(400).json({ message: 'Faltan groupId o email.' });
+        if (!(await assertGroupManager(req, res, groupId))) return;
+        if (invitedEmail === req.user.email) return res.status(400).json({ message: 'No puedes invitarte a ti mismo.' });
+
+        // El invitado debe existir y estar activo
+        const sheetsClient = await getSheetsClient();
+        const usersResp = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Users!A:I' });
+        const uRows = usersResp.data.values || []; const uHead = uRows[0] || [];
+        const uEmailCol = uHead.findIndex(h => normalize(h) === 'email');
+        const uEstadoCol = uHead.findIndex(h => normalize(h) === 'estado');
+        const uRow = uRows.find((r, i) => i > 0 && normalizeEmailKey(r[uEmailCol]) === invitedEmail);
+        if (!uRow) return res.status(404).json({ message: 'No existe un usuario registrado con ese correo.' });
+        if (uEstadoCol !== -1 && (uRow[uEstadoCol] || 'activo').toString().trim().toLowerCase() === 'inactivo') {
+            return res.status(409).json({ message: 'Ese usuario está desactivado.' });
+        }
+        // No debe ser ya miembro activo
+        const links = await readUserGroupLinks();
+        if (links.some(r => normalizeEmailKey(r[0]) === invitedEmail && normalizeGroupKey(r[1]) === groupId && linkIsActive(r))) {
+            return res.status(409).json({ message: 'Ese usuario ya es miembro del grupo.' });
+        }
+        // Rol de liderazgo único (presidente/tesorero/secretario): que esté libre
+        if (GROUP_LEADER_ROLES.has(proposedRole)) {
+            const holder = await roleHolderEmail(groupId, proposedRole);
+            if (holder) return res.status(409).json({ message: `El rol ${proposedRole} ya está ocupado en este grupo.` });
+        }
+        // No duplicar invitación pendiente
+        const invs = await readInvitations();
+        const dup = invs.some(r => normalizeGroupKey(r[1]) === groupId && normalizeEmailKey(r[2]) === invitedEmail && (r[6] || '').toString().trim().toLowerCase() === 'pendiente');
+        if (dup) return res.status(409).json({ message: 'Ya hay una invitación pendiente para ese usuario.' });
+
+        const now = new Date();
+        const exp = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+        await sheetsClient.spreadsheets.values.append({
+            spreadsheetId: SPREADSHEET_ID, range: 'Invitations!A:J', valueInputOption: 'RAW',
+            resource: { values: [[newId('inv'), groupId, invitedEmail, req.user.email, proposedRole, 'invitacion', 'pendiente', now.toISOString(), '', exp.toISOString()]] },
+        });
+        return res.status(201).json({ message: 'Invitación enviada. El usuario debe aceptarla.' });
+    } catch (error) {
+        console.error('[INVITAR-MIEMBRO] Error:', error.message);
+        return res.status(500).json({ message: 'Error al invitar miembro.', error: error.message });
+    }
+});
+
+// Invitaciones pendientes del usuario autenticado (para aceptar/rechazar)
+app.get('/api/mis-invitaciones', async (req, res) => {
+    try {
+        const me = req.user.email;
+        const invs = await readInvitations();
+        const hoy = new Date();
+        // Nombres de grupos
+        let groupName = {};
+        try {
+            const grupos = await groupsService.listAllGroups();
+            const headers = await groupsService.getGroupsHeaders();
+            const idCol = headers.findIndex(h => normalize(h) === 'groupid');
+            const nameCol = headers.findIndex(h => normalize(h) === 'groupname');
+            grupos.forEach(r => { if (r[idCol]) groupName[(r[idCol] || '').toString().trim()] = r[nameCol] || ''; });
+        } catch (e) { groupName = {}; }
+        const pendientes = invs
+            .filter(r => normalizeEmailKey(r[2]) === me && (r[5] || '').toString().toLowerCase() === 'invitacion' && (r[6] || '').toString().toLowerCase() === 'pendiente')
+            .filter(r => { const exp = r[9] ? new Date(r[9]) : null; return !exp || exp >= hoy; })
+            .map(r => ({ invitationId: r[0], groupId: r[1], groupName: groupName[(r[1] || '').toString().trim()] || r[1], invitedBy: r[3], role: r[4], createdAt: r[7], expiresAt: r[9] }));
+        return res.json({ invitaciones: pendientes });
+    } catch (error) {
+        console.error('[MIS-INVITACIONES] Error:', error.message);
+        return res.status(500).json({ message: 'Error al obtener invitaciones.', invitaciones: [] });
+    }
+});
+
+// Aceptar o rechazar una invitación (solo el propio invitado)
+app.post('/api/responder-invitacion', async (req, res) => {
+    try {
+        const { invitationId, accion } = req.body || {};
+        if (!invitationId || !['aceptar', 'rechazar'].includes(accion)) {
+            return res.status(400).json({ message: 'Faltan invitationId o acción (aceptar|rechazar).' });
+        }
+        const sheetsClient = await getSheetsClient();
+        const invs = await readInvitations();
+        const idx = invs.findIndex(r => (r[0] || '').toString().trim() === invitationId.toString().trim());
+        if (idx === -1) return res.status(404).json({ message: 'Invitación no encontrada.' });
+        const inv = invs[idx];
+        if (normalizeEmailKey(inv[2]) !== req.user.email) return res.status(403).json({ message: 'Esta invitación no es para ti.' });
+        if ((inv[6] || '').toString().toLowerCase() !== 'pendiente') return res.status(409).json({ message: 'Esta invitación ya fue respondida.' });
+        const exp = inv[9] ? new Date(inv[9]) : null;
+        if (exp && exp < new Date()) return res.status(409).json({ message: 'La invitación expiró.' });
+
+        const rowNum = idx + 2; // +2: fila 1 = cabecera
+        if (accion === 'aceptar') {
+            const groupId = (inv[1] || '').toString().trim();
+            const role = normalizeGroupRole(inv[4]);
+            // Re-validar rol único libre
+            if (GROUP_LEADER_ROLES.has(role) && await roleHolderEmail(groupId, role)) {
+                return res.status(409).json({ message: `El rol ${role} ya fue ocupado; pide otra invitación.` });
+            }
+            const link = await createUserGroupLink({ UserEmail: req.user.email, GroupID: groupId, JoinDate: new Date().toISOString(), GroupRole: role, InvitedBy: inv[3] });
+            if (!link.ok && link.status !== 409) return res.status(link.status).json(link.body);
+        }
+        await sheetsClient.spreadsheets.values.update({
+            spreadsheetId: SPREADSHEET_ID, range: `Invitations!G${rowNum}:I${rowNum}`, valueInputOption: 'RAW',
+            resource: { values: [[accion === 'aceptar' ? 'aceptada' : 'rechazada', inv[7] || '', new Date().toISOString()]] },
+        });
+        return res.json({ success: true, message: accion === 'aceptar' ? 'Te uniste al grupo.' : 'Invitación rechazada.' });
+    } catch (error) {
+        console.error('[RESPONDER-INVITACION] Error:', error.message);
+        return res.status(500).json({ message: 'Error al responder la invitación.', error: error.message });
     }
 });
 
@@ -1119,7 +1287,9 @@ async function getLoanGroupMap() {
     return map;
 }
 
-async function createUserGroupLink({ UserEmail, GroupID, JoinDate, GroupRole }) {
+// UserGroupLinks: A=UserEmail, B=GroupID, C=JoinDate, D=GroupRole, E=Estado(activo|inactivo), F=InvitedBy
+// Un vínculo SIEMPRE significa miembro ACTIVO (las invitaciones pendientes viven en la hoja Invitations).
+async function createUserGroupLink({ UserEmail, GroupID, JoinDate, GroupRole, InvitedBy }) {
     if (!UserEmail || !GroupID || !JoinDate || !GroupRole) {
         return { ok: false, status: 400, body: { message: 'Faltan datos para vincular usuario a grupo. Se requieren: UserEmail, GroupID, JoinDate, GroupRole.' } };
     }
@@ -1131,7 +1301,7 @@ async function createUserGroupLink({ UserEmail, GroupID, JoinDate, GroupRole }) 
     // Evita duplicados (mismo usuario y mismo grupo)
     const existingResp = await sheetsClient.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: 'UserGroupLinks!A2:E',
+        range: 'UserGroupLinks!A2:F',
     });
     const rows = existingResp.data.values || [];
     const alreadyLinked = rows.some((row) =>
@@ -1142,10 +1312,10 @@ async function createUserGroupLink({ UserEmail, GroupID, JoinDate, GroupRole }) 
         return { ok: false, status: 409, body: { message: 'El usuario ya pertenece al grupo.' } };
     }
 
-    const values = [[normalizedEmail, normalizedGroupId, JoinDate, normalizedRole]];
+    const values = [[normalizedEmail, normalizedGroupId, JoinDate, normalizedRole, 'activo', normalize(InvitedBy) || 'self']];
     const response = await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: 'UserGroupLinks!A:E',
+        range: 'UserGroupLinks!A:F',
         valueInputOption: 'USER_ENTERED',
         resource: { values },
     });
@@ -1153,7 +1323,7 @@ async function createUserGroupLink({ UserEmail, GroupID, JoinDate, GroupRole }) 
     return {
         ok: true,
         status: 201,
-        body: { message: 'VÃ­nculo usuario-grupo creado en Google Sheet con Ã©xito.', data: response.data },
+        body: { message: 'Vinculo usuario-grupo creado con exito.', data: response.data },
     };
 }
 
@@ -1759,9 +1929,12 @@ app.post('/api/registrar-voto', async (req, res) => {
             const sheetName = sheetMap[tipo];
 
             if (sheetName) {
+                // Quórum dinámico: en grupos con 1 solo líder basta 1 voto; con 2+ líderes se piden 2.
+                const numLideres = await getActiveLeaderCount(grupoId);
+                const quorum = Math.min(2, Math.max(1, numLideres));
                 let nuevoEstado = null;
                 if (rechazos >= 1) nuevoEstado = 'rechazado';
-                else if (aprobaciones >= 2) nuevoEstado = 'aprobado';
+                else if (aprobaciones >= quorum) nuevoEstado = 'aprobado';
 
                 if (nuevoEstado) {
                     const solResp = await sheetsClient.spreadsheets.values.get({
@@ -2588,14 +2761,46 @@ app.post('/api/cambiar-rol-usuario-grupo', async (req, res) => {
         const joinDateCol = headers.indexOf('JoinDate');
 
         const isLeadershipRole = GROUP_ADMIN_ROLES.has(NewGroupRole) || NewGroupRole === 'secretario';
-        if (isLeadershipRole) {
+        const reqEmail = normalize(req.user && req.user.email);
+        const isAdmin = req.user && req.user.role === 'admin';
+        const groupRows = rows.filter(r => (r[groupIdCol] || '').toString().trim() === GroupID);
+        const presRow = groupRows.find(r => normalize(r[groupRoleCol]) === 'presidente');
+        const currentPresidentEmail = presRow ? normalize(presRow[userEmailCol]) : null;
+        const targetRow = groupRows.find(r => normalize(r[userEmailCol]) === UserEmail);
+        const targetCurrentRole = targetRow ? normalize(targetRow[groupRoleCol]) : null;
+
+        // Invariante: el grupo nunca se queda sin presidente. Para "quitar" la presidencia,
+        // se transfiere asignando presidente a otro miembro (esto degrada al actual automáticamente).
+        if (targetCurrentRole === 'presidente' && NewGroupRole !== 'presidente') {
+            return res.status(409).json({ message: 'No puedes quitar la presidencia directamente. Asigna a otro miembro como presidente y la presidencia se transferirá automáticamente.' });
+        }
+
+        // Transferencia de presidencia: solo el presidente actual (o admin) puede ceder el cargo.
+        if (NewGroupRole === 'presidente' && currentPresidentEmail && currentPresidentEmail !== UserEmail) {
+            if (!isAdmin && reqEmail !== currentPresidentEmail) {
+                return res.status(403).json({ message: 'Solo el presidente actual puede transferir la presidencia.' });
+            }
+            const presIdx = rows.findIndex(r => normalize(r[userEmailCol]) === currentPresidentEmail && (r[groupIdCol] || '').toString().trim() === GroupID);
+            if (presIdx !== -1) {
+                rows[presIdx][groupRoleCol] = 'member';
+                await sheetsClient.spreadsheets.values.update({
+                    spreadsheetId: SPREADSHEET_ID,
+                    range: `UserGroupLinks!A${presIdx + 2}:E${presIdx + 2}`,
+                    valueInputOption: 'USER_ENTERED',
+                    resource: { values: [rows[presIdx]] },
+                });
+            }
+        }
+
+        // Rol único tesorero/secretario: debe estar libre (presidente ya se maneja con transferencia arriba).
+        if (isLeadershipRole && NewGroupRole !== 'presidente') {
             const conflict = rows.some((row) =>
                 (row[groupIdCol] || '').toString().trim() === GroupID &&
                 normalize(row[groupRoleCol]) === NewGroupRole &&
                 normalize(row[userEmailCol]) !== UserEmail
             );
             if (conflict) {
-                return res.status(409).json({ message: `Ya existe un ${NewGroupRole} en este grupo.` });
+                return res.status(409).json({ message: `Ya existe un ${NewGroupRole} en este grupo. Libéralo antes de asignarlo.` });
             }
         }
 
@@ -2668,6 +2873,17 @@ app.post('/api/desvincular-usuario-grupo', async (req, res) => {
         if (rowIndex === -1) {
             return res.status(404).json({ message: 'No se encontrÃ³ la relaciÃ³n usuario-grupo.' });
         }
+        // Invariante: no eliminar al único presidente (dejaría al grupo sin liderazgo).
+        const groupRoleColD = headers.indexOf('GroupRole');
+        const targetRole = (rows[rowIndex][groupRoleColD] || '').toString().trim().toLowerCase();
+        if (targetRole === 'presidente') {
+            const otherPresident = rows.some((row, i) => i !== rowIndex &&
+                (row[groupIdCol] || '').toString().trim() === GroupID.trim() &&
+                (row[groupRoleColD] || '').toString().trim().toLowerCase() === 'presidente');
+            if (!otherPresident) {
+                return res.status(409).json({ message: 'No puedes eliminar al único presidente. Transfiere primero la presidencia a otro miembro.' });
+            }
+        }
         // Obtener sheetId real
         const spreadsheet = await sheetsClient.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
         const ugSheet = spreadsheet.data.sheets.find(s => s.properties.title === 'UserGroupLinks');
@@ -2693,6 +2909,38 @@ app.post('/api/desvincular-usuario-grupo', async (req, res) => {
     } catch (error) {
         console.error('[DESVINCULAR USUARIO-GRUPO] Error:', error.message, error.stack);
         res.status(500).json({ message: 'Error al desvincular usuario del grupo.', error: error.message });
+    }
+});
+
+// Salir voluntariamente de un grupo (cualquier miembro, solo a sí mismo). El único presidente no puede salir sin transferir.
+app.post('/api/salir-grupo', async (req, res) => {
+    const GroupID = (req.body?.groupId || req.body?.GroupID || '').toString().trim();
+    if (!GroupID) return res.status(400).json({ message: 'Falta groupId.' });
+    const me = req.user.email;
+    try {
+        const sheetsClient = await getSheetsClient();
+        const response = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'UserGroupLinks!A2:F' });
+        const rows = response.data.values || [];
+        const rowIndex = rows.findIndex(r => normalizeEmailKey(r[0]) === me && (r[1] || '').toString().trim() === GroupID);
+        if (rowIndex === -1) return res.status(404).json({ message: 'No perteneces a ese grupo.' });
+        const myRole = (rows[rowIndex][3] || '').toString().trim().toLowerCase();
+        if (myRole === 'presidente') {
+            const otherPresident = rows.some((r, i) => i !== rowIndex && (r[1] || '').toString().trim() === GroupID && (r[3] || '').toString().trim().toLowerCase() === 'presidente');
+            if (!otherPresident) {
+                return res.status(409).json({ message: 'Eres el único presidente. Transfiere la presidencia antes de salir del grupo.' });
+            }
+        }
+        const spreadsheet = await sheetsClient.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+        const ugSheet = spreadsheet.data.sheets.find(s => s.properties.title === 'UserGroupLinks');
+        const sheetId = ugSheet.properties.sheetId;
+        await sheetsClient.spreadsheets.batchUpdate({
+            spreadsheetId: SPREADSHEET_ID,
+            resource: { requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: rowIndex + 1, endIndex: rowIndex + 2 } } }] },
+        });
+        res.json({ success: true, message: 'Saliste del grupo correctamente.' });
+    } catch (error) {
+        console.error('[SALIR-GRUPO] Error:', error.message);
+        res.status(500).json({ message: 'Error al salir del grupo.', error: error.message });
     }
 });
 
