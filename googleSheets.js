@@ -1,47 +1,61 @@
+/**
+ * googleSheets.js
+ * Cliente compartido de la API de Google Sheets.
+ *
+ * Antes este archivo era un resto de una version vieja: exportaba solo `findUser`
+ * (que nadie usaba) con un SPREADSHEET_ID de ejemplo. `services/loansService.js`
+ * importaba de aqui `getGoogleSheetsClient` y `SPREADSHEET_ID`, que no existian,
+ * asi que TODO loansService fallaba con "getGoogleSheetsClient is not a function":
+ * los endpoints /api/obtener-todos-prestamos y /api/registrar-prestamo-en-sheet
+ * respondian 500 siempre.
+ */
+
 const { google } = require('googleapis');
 const path = require('path');
 const fs = require('fs');
 
-const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json');
-const SPREADSHEET_ID = 'TU_SPREADSHEET_ID_AQUI'; // <-- Cambia esto por tu ID real
-const SHEET_NAME = 'usuarios'; // <-- Cambia esto por el nombre de tu hoja
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1xWRnnSp5WjveWHvFJFcNO7bCfB1jyADtawmdXPQJtEA';
 
-async function authorize() {
-  const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
-  const { client_email, private_key } = credentials;
-  const auth = new google.auth.JWT(
-    client_email,
-    null,
-    private_key,
-    ['https://www.googleapis.com/auth/spreadsheets']
-  );
-  await auth.authorize();
-  return auth;
-}
-
-async function findUser(email, password) {
-  const auth = await authorize();
-  const sheets = google.sheets({ version: 'v4', auth });
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: SHEET_NAME,
-  });
-  const rows = res.data.values;
-  if (!rows || rows.length === 0) return null;
-  // Suponiendo que la primera fila es encabezado
-  const headers = rows[0];
-  const emailIdx = headers.indexOf('email');
-  const passIdx = headers.indexOf('password');
-  for (let i = 1; i < rows.length; i++) {
-    if (
-      rows[i][emailIdx] === email &&
-      rows[i][passIdx] === password
-    ) {
-      // Devuelve el usuario completo (puedes ajustar esto)
-      return Object.fromEntries(headers.map((h, idx) => [h, rows[i][idx]]));
+/** Credenciales: variable de entorno (produccion) o credentials.json (local). */
+function cargarCredenciales() {
+  if (process.env.GOOGLE_CREDENTIALS) {
+    try {
+      return JSON.parse(process.env.GOOGLE_CREDENTIALS);
+    } catch (e) {
+      console.error('[GOOGLE SHEETS] GOOGLE_CREDENTIALS no es un JSON valido:', e.message);
+    }
+  }
+  const archivo = path.resolve(__dirname, 'credentials.json');
+  if (fs.existsSync(archivo)) {
+    try {
+      return JSON.parse(fs.readFileSync(archivo, 'utf8'));
+    } catch (e) {
+      console.error('[GOOGLE SHEETS] credentials.json no es un JSON valido:', e.message);
     }
   }
   return null;
 }
 
-module.exports = { findUser };
+let clientePromesa = null;
+
+/** Devuelve (y memoriza) el cliente autenticado de Sheets. */
+async function getGoogleSheetsClient() {
+  if (clientePromesa) return clientePromesa;
+  clientePromesa = (async () => {
+    const credenciales = cargarCredenciales();
+    if (!credenciales) {
+      throw new Error('No hay credenciales de Google (define GOOGLE_CREDENTIALS o coloca credentials.json).');
+    }
+    const auth = new google.auth.GoogleAuth({
+      credentials: credenciales,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    return google.sheets({ version: 'v4', auth: await auth.getClient() });
+  })().catch((error) => {
+    clientePromesa = null; // permite reintentar en la siguiente llamada
+    throw error;
+  });
+  return clientePromesa;
+}
+
+module.exports = { getGoogleSheetsClient, SPREADSHEET_ID };

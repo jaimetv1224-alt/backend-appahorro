@@ -2,6 +2,15 @@ const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 
+// Neutraliza la inyeccion de formulas de Sheets: un texto que empieza con = + - @
+// se guarda prefijado con apostrofo para que la hoja lo trate como texto literal.
+function sanitizeSheetCell(value, maxLen = 500) {
+  let str = (value == null ? '' : value).toString();
+  if (str.length > maxLen) str = str.slice(0, maxLen);
+  if (/^[=+\-@\t\r]/.test(str)) str = "'" + str;
+  return str;
+}
+
 // Parser de dinero tolerante a locale es-EC: "137,37" -> 137.37, "1.234,56" -> 1234.56
 function toMoney(value) {
   if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
@@ -226,19 +235,28 @@ class SavingsService {
       const fecha = new Date().toISOString();
 
       // Hoja canonica: Savings con convencion posicional A=email,B=group,C=amount,D=date,E=type,F=descripcion
-      // (coincide con savings/complete y los datos existentes). Asi el ahorro SI se refleja en el patrimonio.
+      // y columnas de control interno G=Estado, H=RegistradoPor, I=ResueltoPor, J=FechaEstado, K=MovID, L=Nota.
+      // Un ahorro solo suma al patrimonio cuando su Estado es 'confirmado'.
+      const movId = savingData.movId || savingId;
+      const estado = (savingData.estado || 'confirmado').toString().trim().toLowerCase();
       const values = [
         email,
         groupId,
         toMoney(monto),
         fecha.split('T')[0], // Solo la fecha (D=Date)
         tipo || 'mensual',   // E=Type
-        descripcion || ''    // F=Description
+        sanitizeSheetCell(descripcion, 500), // F=Description (neutraliza formulas)
+        estado,              // G=Estado
+        (savingData.registradoPor || email).toString().trim().toLowerCase(), // H=RegistradoPor
+        estado === 'confirmado' && savingData.resueltoPor ? savingData.resueltoPor : '', // I=ResueltoPor
+        estado === 'confirmado' && savingData.resueltoPor ? fecha : '',                   // J=FechaEstado
+        movId,               // K=MovID
+        ''                   // L=Nota
       ];
 
       await this.sheets.spreadsheets.values.append({
         spreadsheetId: spreadsheetId,
-        range: 'Savings!A:F',
+        range: 'Savings!A:L',
         valueInputOption: 'RAW',
         resource: {
           values: [values]
@@ -247,7 +265,9 @@ class SavingsService {
 
       return {
         success: true,
-        savingId: savingId,
+        savingId: movId,
+        movId,
+        estado,
         data: values
       };
     } catch (error) {
@@ -267,7 +287,7 @@ class SavingsService {
       
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: spreadsheetId,
-        range: 'Savings!A:F'
+        range: 'Savings!A:L'
       });
 
       const rows = response.data.values || [];
@@ -285,13 +305,21 @@ class SavingsService {
 
       return rows.slice(1)
         .filter((row) => norm(row[0]) === targetEmail && (!targetGroup || (row[1] || '').toString().trim() === targetGroup))
-        .map((row) => ({
-          tipo: row[4] || 'mensual',
-          monto: toMoney(row[2]),
-          descripcion: row[5] || '',
-          fecha: row[3] || '',
-          estado: 'Activo'
-        }));
+        .map((row) => {
+          // G=Estado: vacio en filas historicas equivale a 'confirmado'
+          const estadoCtrl = (row[6] || '').toString().trim().toLowerCase() || 'confirmado';
+          return {
+            tipo: row[4] || 'mensual',
+            monto: toMoney(row[2]),
+            descripcion: row[5] || '',
+            fecha: row[3] || '',
+            estado: estadoCtrl,
+            movId: row[10] || '',
+            registradoPor: (row[7] || '').toString().trim().toLowerCase(),
+            resueltoPor: (row[8] || '').toString().trim().toLowerCase(),
+            cuenta: estadoCtrl === 'confirmado'
+          };
+        });
     } catch (error) {
       console.error('Error obteniendo ahorros:', error);
       throw error;
@@ -308,11 +336,18 @@ class SavingsService {
         return this.getMockSavingsStats();
       }
       
-      const savings = await this.getSavingsByUser(spreadsheetId, email, groupId);
-      
-      // Obtener también las acciones del usuario
+      const todos = await this.getSavingsByUser(spreadsheetId, email, groupId);
+
+      // Control interno: solo los aportes CONFIRMADOS por la tesoreria cuentan.
+      // Los pendientes se informan aparte para que el socio los vea sin que
+      // inflen su patrimonio.
+      const savings = todos.filter((s) => s.cuenta !== false);
+      const pendientes = todos.filter((s) => s.estado === 'pendiente');
+      const rechazados = todos.filter((s) => s.estado === 'rechazado');
+
+      // Obtener también las acciones del usuario (getUserShares ya filtra confirmadas)
       const shares = await this.getUserShares(spreadsheetId, email, groupId);
-      
+
       const totalSavingsAmount = savings.reduce((sum, saving) => sum + saving.monto, 0);
       const totalSharesAmount = shares.reduce((sum, share) => sum + (share.cantidad * share.valorAccion), 0);
       const totalAmount = totalSavingsAmount + totalSharesAmount;
@@ -358,7 +393,10 @@ class SavingsService {
         totalShares: shares.length,
         averageAmount: savings.length > 0 ? totalSavingsAmount / savings.length : 0,
         monthlyTrend,
-        shares: shares
+        shares: shares,
+        pendienteAmount: pendientes.reduce((sum, s) => sum + s.monto, 0),
+        pendienteCount: pendientes.length,
+        rechazadoCount: rechazados.length
       };
     } catch (error) {
       console.error('Error calculando estadísticas:', error);
@@ -438,34 +476,34 @@ class SavingsService {
       const rows = response.data.values || [];
       if (rows.length <= 1) return [];
       
-      const headers = rows[0];
-      const goals = rows.slice(1).map(row => {
-        const goal = {};
-        headers.forEach((header, index) => {
-          goal[header] = row[index] || '';
-        });
-        return goal;
-      });
-      
-      // Filtrar por usuario y grupo si se especifica
-      let filteredGoals = goals.filter(goal => goal.Email === email);
-      
-      if (groupId) {
-        filteredGoals = filteredGoals.filter(goal => goal.GroupID === groupId);
-      }
-      
-      return filteredGoals.map(goal => ({
-        id: goal.ID,
-        nombre: goal.Nombre,
-        montoObjetivo: Number(goal.MontoObjetivo) || 0,
-        montoActual: Number(goal.MontoActual) || 0,
-        fechaObjetivo: goal.FechaObjetivo,
-        descripcion: goal.Descripcion,
-        prioridad: goal.Prioridad,
-        categoria: goal.Categoria,
-        estado: goal.Estado,
-        fechaCreacion: goal.FechaCreacion
-      }));
+      // Lectura POSICIONAL, no por nombre de cabecera. Leyendo por nombre, el id
+      // salia vacio si la cabecera de la hoja no decia exactamente 'ID'; y sin id
+      // la pantalla de metas no podia editar ni borrar (usaba un identificador
+      // inventado tipo "goal-0" que no existe en la hoja).
+      // Orden real que escribe addSavingGoal:
+      // A=GoalID B=Email C=GroupID D=Nombre E=MontoObjetivo F=MontoActual
+      // G=FechaObjetivo H=Descripcion I=Prioridad J=Categoria K=Estado L=FechaCreacion
+      const norm = (v) => (v || '').toString().trim().toLowerCase();
+      const targetEmail = norm(email);
+      const targetGroup = (groupId || '').toString().trim();
+
+      return rows.slice(1)
+        .filter((row) => norm(row[1]) === targetEmail
+          && (!targetGroup || (row[2] || '').toString().trim() === targetGroup))
+        .map((row) => ({
+          goalId: row[0] || '',
+          id: row[0] || '',   // alias por compatibilidad con el frontend
+          ID: row[0] || '',
+          nombre: row[3] || '',
+          montoObjetivo: toMoney(row[4]),
+          montoActual: toMoney(row[5]),
+          fechaObjetivo: row[6] || '',
+          descripcion: row[7] || '',
+          prioridad: row[8] || 'medium',
+          categoria: row[9] || 'personal',
+          estado: row[10] || 'Activa',
+          fechaCreacion: row[11] || ''
+        }));
     } catch (error) {
       console.error('Error obteniendo metas de ahorro:', error);
       throw error;
@@ -598,11 +636,18 @@ class SavingsService {
       
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: spreadsheetId,
-        range: 'Acciones!A:G'
+        range: 'Acciones!A:M'
       });
-      
-      const rows = response.data.values || [];
-      if (rows.length <= 1) return [];
+
+      const rowsRaw = response.data.values || [];
+      if (rowsRaw.length <= 1) return [];
+      // H=Estado (idx 7): solo las compras confirmadas cuentan como capital.
+      const rows = [rowsRaw[0]].concat(
+        rowsRaw.slice(1).filter((r) => {
+          const e = (r[7] || '').toString().trim().toLowerCase();
+          return !e || e === 'confirmado';
+        })
+      );
       
       const headers = rows[0];
       const shares = rows.slice(1).map(row => {
