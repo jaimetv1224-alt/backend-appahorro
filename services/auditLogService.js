@@ -8,6 +8,7 @@
  *   - Date
  */
 const { google } = require('googleapis');
+const { envolver: envolverHoja } = require('../hoja');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
@@ -46,7 +47,7 @@ async function getSheetsClient() {
   });
 
   const client = await auth.getClient();
-  sheetsClient = google.sheets({ version: 'v4', auth: client });
+  sheetsClient = envolverHoja(google.sheets({ version: 'v4', auth: client }));
   return sheetsClient;
 }
 

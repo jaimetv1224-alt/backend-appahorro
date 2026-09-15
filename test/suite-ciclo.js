@@ -4,7 +4,7 @@
  * roles, aportes, prestamo por votacion y pago del prestamo.
  */
 
-const { seedWorkbook, get, post, fake, BASE, anotar } = require('./harness');
+const { hoyLocal, PNG_PRUEBA, seedWorkbook, get, post, fake, BASE, anotar } = require('./harness');
 const { login } = require('./scenario');
 const t = require('./runner');
 
@@ -22,8 +22,8 @@ async function subirPago({ token, loanId, amount, userEmail, groupId }) {
   form.append('amount', String(amount));
   form.append('userEmail', userEmail);
   if (groupId) form.append('groupId', groupId);
-  form.append('paymentDate', new Date().toISOString().split('T')[0]);
-  form.append('paymentImage', new Blob([Buffer.from('imagen-de-prueba')], { type: 'image/png' }), 'comprobante.png');
+  form.append('paymentDate', hoyLocal());
+  form.append('paymentImage', new Blob([PNG_PRUEBA], { type: 'image/png' }), 'comprobante.png');
   anotar('POST', '/api/upload-payment');
     const res = await fetch(`${BASE}/api/upload-payment`, {
     method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form,
@@ -205,12 +205,89 @@ module.exports = async function run() {
   }
 
   // ===================================================================
+  t.section('CICLO 4b. El cupo que se ensena es el que aplica el servidor');
+  // ===================================================================
+  // La pantalla calculaba el cupo por su cuenta como patrimonio x 3 y ensenaba
+  // $1.470 cuando el real eran $570. Ademas dejaba pulsar el boton aunque la
+  // persona ya tuviera su prestamo activo: el rechazo llegaba despues de
+  // rellenarlo todo.
+  const cupo = await get(`/api/mi-cupo?groupId=${groupId}`, tk.M);
+  t.status('el socio puede consultar su cupo', cupo, 200);
+  t.check('trae su ahorro confirmado', Number.isFinite(cupo.body?.ahorroConfirmado),
+    JSON.stringify(cupo.body));
+  t.eq('y el factor del reglamento', cupo.body?.factor, 3);
+  t.near('el cupo es el ahorro por el factor, no el patrimonio',
+    cupo.body?.cupoMaximo, (cupo.body?.ahorroConfirmado || 0) * 3, 0.01);
+  t.eq('dice cuantos prestamos tiene activos', cupo.body?.prestamosActivos, 1);
+  t.eq('y que ya alcanzo el maximo del reglamento', cupo.body?.disponible, 0);
+  t.eq('asi que no puede pedir', cupo.body?.puedePedir, false);
+  t.check('explicando por que', /activo/i.test(cupo.body?.motivo || ''), cupo.body?.motivo);
+  t.check('y trae el interes del grupo, para poder ensenar la cuota',
+    cupo.body?.interesMensual === 2, `${cupo.body?.interesMensual}`);
+
+  t.status('el cupo de un grupo ajeno no se consulta',
+    await get('/api/mi-cupo?groupId=G2', tk.M), 403);
+  t.status('sin grupo, 400', await get('/api/mi-cupo', tk.M), 400);
+
+  // ===================================================================
+  t.section('CICLO 5b. El socio paga con el identificador del PRESTAMO');
+  // ===================================================================
+  // La pantalla de subir comprobante armaba la lista desde la hoja de
+  // movimientos y mandaba el identificador de la TRANSACCION, que no es el del
+  // prestamo. El servidor no lo encontraba y devolvia 403 siempre: ningun socio
+  // podia pagar su credito. Aqui se fija la diferencia.
+  const susPrestamos = await get(`/api/obtener-prestamos?groupId=${groupId}&userEmail=${M}`, tk.M);
+  const elPrestamo = (susPrestamos.body?.loans || [])[0];
+  t.check('el prestamo trae su propio identificador', !!elPrestamo?.loanId, JSON.stringify(elPrestamo || {}));
+
+  const trans = await get(`/api/obtener-transacciones?userEmail=${M}`, tk.M);
+  const laTransaccion = (trans.body?.transacciones || []).find((x) => x.type === 'loan');
+  t.check('y la transaccion del desembolso trae otro distinto',
+    !!laTransaccion && laTransaccion.transactionId !== undefined, JSON.stringify(laTransaccion || {}));
+
+  const conIdDeTransaccion = await subirPago({
+    token: tk.M, loanId: laTransaccion?.transactionId || 'T_INEXISTENTE',
+    amount: 10, userEmail: M, groupId,
+  });
+  t.statusIn('pagar con el identificador equivocado se rechaza', conIdDeTransaccion, [403, 404]);
+
+  const conIdCorrecto = await subirPago({
+    token: tk.M, loanId: elPrestamo?.loanId, amount: 10, userEmail: M, groupId,
+  });
+  t.statusIn('y con el del prestamo, funciona', conIdCorrecto, [200, 201]);
+
+  t.near('el saldo que hay que ensenarle es lo que FALTA, no el capital',
+    elPrestamo?.remainingBalance, 70, 0.01);
+  t.check('distinto del capital prestado',
+    Math.abs((elPrestamo?.remainingBalance || 0) - (elPrestamo?.amount || 0)) > 0.01,
+    `falta ${elPrestamo?.remainingBalance}, capital ${elPrestamo?.amount}`);
+
+  // ===================================================================
   t.section('CICLO 6. Salidas y transferencia de la presidencia');
   // ===================================================================
-  t.status('el socio puede salirse del grupo por su cuenta',
-    await post('/api/salir-grupo', { groupId }, tk.M), 200);
+  // Con un prestamo sin terminar de pagar NO se sale: la deuda quedaria
+  // incobrable. Medido antes del arreglo: salio debiendo $168 y despues ni
+  // siquiera podia pagar.
+  const salidaDebiendo = await post('/api/salir-grupo', { groupId }, tk.M);
+  t.status('no se sale del grupo debiendo un prestamo', salidaDebiendo, 409);
+  t.eq('y se dice el motivo', salidaDebiendo.body?.codigo, 'PRESTAMO_VIVO');
+
+  // Quien no debe nada si puede PEDIR la salida. Ojo: pedirla ya no la borra del
+  // grupo. Antes se borraba la fila del vinculo en el acto y su dinero se quedaba
+  // dentro: medido, una socia puso $210, le tocaban $2,78 de utilidades, cobro
+  // $0,00 y sus $210 siguieron sumando en el patrimonio. Ahora sigue siendo socia
+  // hasta que la asamblea aprueba su liquidacion y se le devuelve lo suyo.
+  const pidioSalir = await post('/api/salir-grupo', { groupId }, tk.S);
+  t.status('quien no debe nada si puede pedir la salida', pidioSalir, 200);
+  t.eq('y queda como solicitada', pidioSalir.body?.estado, 'solicitada');
   const miembros2 = await get(`/api/obtener-miembros?groupId=${groupId}`, tk.P);
-  t.eq('el grupo queda con 3 miembros', (miembros2.body?.miembros || miembros2.body?.members || []).length, 3);
+  t.eq('sigue contando como socia hasta que le paguen lo suyo',
+    (miembros2.body?.miembros || miembros2.body?.members || []).length, 4);
+
+  const susSalidas = await get(`/api/gob/salidas?groupId=${groupId}`, tk.P);
+  t.check('la directiva ve la solicitud de salida',
+    (susSalidas.body?.salidas || []).some((x) => x.estado === 'solicitada'),
+    JSON.stringify(susSalidas.body?.salidas));
 
   t.status('la presidenta transfiere la presidencia al tesorero',
     await post('/api/cambiar-rol-usuario-grupo', { GroupID: groupId, UserEmail: T, NewGroupRole: 'presidente' }, tk.P), 200);

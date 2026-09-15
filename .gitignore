@@ -5,3 +5,8 @@ uploads/
 *.log
 *.bak
 *.bak-*
+
+# El zip de respaldo se genera al empaquetar; no va al repositorio.
+juntago-backend.zip
+# Salida de la auditoria de pantallas, se regenera en cada pasada.
+test/auditoria-pantallas.json

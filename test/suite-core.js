@@ -173,8 +173,12 @@ module.exports = async function run() {
   // -------------------------------------------------------------------
   t.statusIn('no se aceptan ahorros negativos',
     await post('/api/savings', { groupId, tipo: 'mensual', monto: -100 }, tokens.socio1), [400]);
-  t.statusIn('no se aceptan acciones con valor cero',
-    await post('/api/registrar-acciones', { groupId, date: '2026-08-01', shares: 5, shareValue: 0, interestRate: 2 }, tokens.socio1), [400]);
+  // El precio de la accion lo pone el grupo, no quien compra: mandar un cero se
+  // rechaza por desajuste con la cifra del grupo, nunca se acepta.
+  t.statusIn('no se aceptan acciones con un valor distinto del que fijo el grupo',
+    await post('/api/registrar-acciones', { groupId, date: '2026-08-01', shares: 5, shareValue: 0, interestRate: 2 }, tokens.socio1), [409]);
+  t.statusIn('tampoco con un interes distinto del que fijo el grupo',
+    await post('/api/registrar-acciones', { groupId, date: '2026-08-01', shares: 5, shareValue: 10, interestRate: 99 }, tokens.socio1), [409]);
   t.statusIn('no se aceptan montos no numericos en solicitudes',
     await post('/api/registrar-solicitud', { tipo: 'prestamo', data: { Monto: 'muchisimo', Group: groupId } }, tokens.socio1), [400]);
   t.statusIn('no se aceptan solicitudes de tipo desconocido',

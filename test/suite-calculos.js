@@ -8,7 +8,7 @@
  * prestamos activos.
  */
 
-const { seedWorkbook, get, post, fake, anotar } = require('./harness');
+const { hoyLocal, PNG_PRUEBA, seedWorkbook, get, post, fake, anotar } = require('./harness');
 const { baseScenario } = require('./scenario');
 const t = require('./runner');
 
@@ -72,8 +72,8 @@ module.exports = async function run() {
     form.append('amount', String(monto));
     form.append('userEmail', e2.users.socio1.email);
     form.append('groupId', e2.groupId);
-    form.append('paymentDate', '2026-08-20');
-    form.append('paymentImage', new Blob([Buffer.from('x')], { type: 'image/png' }), 'c.png');
+    form.append('paymentDate', hoyLocal());
+    form.append('paymentImage', new Blob([PNG_PRUEBA], { type: 'image/png' }), 'c.png');
     anotar('POST', '/api/upload-payment');
     const res = await fetch(`${BASE}/api/upload-payment`, {
       method: 'POST', headers: { Authorization: `Bearer ${e2.tokens.socio1}` }, body: form,
@@ -153,8 +153,9 @@ module.exports = async function run() {
   t.status('con un prestamo activo no se admite otra solicitud', segundo, 409);
   t.eq('...con el codigo correcto', segundo.body?.codigo, 'MAX_PRESTAMOS_ACTIVOS');
 
-  // Dos solicitudes creadas ANTES de aprobar la primera: la segunda aprobacion
-  // no debe poder saltarse el limite del reglamento.
+  // Una solicitud SIN RESOLVER cuenta igual que un prestamo dado: es dinero
+  // comprometido. Antes se podian dejar dos o tres vivas a la vez ocupando el
+  // cupo del grupo entero hasta que alguien votara.
   seedWorkbook();
   const e5 = await baseScenario();
   seedAhorro(e5.users.socio1.email, e5.groupId, 1000);
@@ -165,11 +166,26 @@ module.exports = async function run() {
     tipo: 'prestamo', data: { Monto: 100, Detalles: 'Plazo: 3', Group: e5.groupId },
   }, e5.tokens.socio1);
   t.status('la primera solicitud entra', s1, 201);
-  t.status('la segunda tambien (aun no hay prestamos activos)', s2, 201);
+  t.status('la segunda ya no: la primera sigue esperando respuesta', s2, 409);
+  t.eq('con su codigo', s2.body?.codigo, 'MAX_PRESTAMOS_ACTIVOS');
+  t.eq('y se dice que hay una esperando', s2.body?.solicitudesPendientes, 1);
+  t.check('el mensaje explica que se puede retirar',
+    /retira la que ya no quieras/i.test(s2.body?.message || ''), s2.body?.message);
 
+  // Y retirando la primera se puede volver a pedir: no queda atrapada.
+  const idPrimera = ((fake.dumpSheet('SolicitudesPrestamos') || []).slice(1)[0] || [])[0];
+  const retiro = await post('/api/retirar-solicitud',
+    { tipo: 'prestamo', id: idPrimera }, e5.tokens.socio1);
+  t.status('la socia retira la primera', retiro, 200);
+  const s3 = await post('/api/registrar-solicitud', {
+    tipo: 'prestamo', data: { Monto: 150, Detalles: 'Plazo: 3', Group: e5.groupId },
+  }, e5.tokens.socio1);
+  t.status('y ya puede pedir otra', s3, 201);
+
+  // Aprobar las dos (la retirada y la nueva) no puede dejar dos prestamos vivos.
   const solicitudes = (fake.dumpSheet('SolicitudesPrestamos') || []).slice(1);
-  const [idA, idB] = [solicitudes[0][0], solicitudes[1][0]];
-  for (const id of [idA, idB]) {
+  for (const fila of solicitudes) {
+    const id = fila[0];
     await post('/api/registrar-voto', { solicitudId: id, tipo: 'prestamo', grupoId: e5.groupId, decision: 'aprobado' }, e5.tokens.presi);
     await post('/api/registrar-voto', { solicitudId: id, tipo: 'prestamo', grupoId: e5.groupId, decision: 'aprobado' }, e5.tokens.teso);
   }
@@ -187,15 +203,35 @@ module.exports = async function run() {
   await post('/api/gob/aportes/resolver',
     { groupId: e6.groupId, tipo: 'accion', movId: compra.body?.movId, accion: 'confirmar' }, e6.tokens.teso);
 
+  // Tener acciones NO genera utilidades por si solo. El grupo reparte lo que
+  // COBRO en intereses de prestamos; antes este endpoint devolvia
+  // `acciones x valor x tasa`, un rendimiento garantizado que no existe, y el
+  // socio veia $5 aunque el grupo no hubiera prestado un centavo.
   const util = await get(`/api/obtener-utilidades?groupId=${e6.groupId}&userEmail=${e6.users.socio1.email}`, e6.tokens.socio1);
-  t.eq('hay una linea de utilidad', util.body?.utilities?.length, 1);
-  t.eq('utilidad = 25 acciones x $10 x 2% = $5', r2(util.body?.utilities?.[0]?.amount), 5);
+  t.status('se pueden consultar las utilidades', util, 200);
+  t.eq('sin prestamos cobrados, no hay utilidades que mostrar',
+    util.body?.utilities?.length, 0);
+  t.eq('y el total es cero, no una promesa', util.body?.total, 0);
+  t.eq('se dice de donde sale la cifra', util.body?.fuente, 'repartos_abonados');
+
+  // Cuando el grupo SI reparte, ahi aparece
+  fake.ensureSheet('Savings').grid.push([
+    e6.users.socio1.email, e6.groupId, 7.5, '2026-04-01', 'utilidad',
+    'Reparto del ciclo', 'confirmado', e6.tokens ? 'presi@juntago.test' : '', '', '', 'utisav_x', '',
+  ]);
+  const util2 = await get(`/api/obtener-utilidades?groupId=${e6.groupId}&userEmail=${e6.users.socio1.email}`, e6.tokens.socio1);
+  t.eq('tras un reparto real, aparece la linea', util2.body?.utilities?.length, 1);
+  t.near('con el importe que de verdad se abono', util2.body?.total, 7.5, 0.01);
 
   const completo = await get(`/api/savings/complete?email=${e6.users.socio1.email}&groupId=${e6.groupId}`, e6.tokens.socio1);
   t.eq('el capital en acciones es 250', r2(completo.body?.data?.totalAcciones), 250);
-  t.eq('el patrimonio = ahorros + acciones + utilidades',
+  // El patrimonio es ahorros + acciones, y nada mas. Las utilidades ya
+  // repartidas se abonan COMO ahorro, asi que sumarlas otra vez las contaria
+  // dos veces: es el doble conteo que hacia que $500 en acciones mas $50
+  // repartidos aparecieran como $590.
+  t.eq('el patrimonio = ahorros + acciones, sin contar dos veces lo repartido',
     r2(completo.body?.data?.totalPatrimonio),
-    r2(Number(completo.body?.data?.totalAhorros) + Number(completo.body?.data?.totalAcciones) + Number(completo.body?.data?.totalUtilidades)));
+    r2(Number(completo.body?.data?.totalAhorros) + Number(completo.body?.data?.totalAcciones)));
 
   // ===================================================================
   t.section('CALC 6. Decimales que suelen romper las sumas');
@@ -247,9 +283,17 @@ module.exports = async function run() {
   t.statusIn('acciones fraccionarias negativas rechazadas',
     await post('/api/registrar-acciones',
       { groupId: e8.groupId, date: '2026-08-01', shares: -3, shareValue: 10, interestRate: 2 }, e8.tokens.socio1), [400]);
-  t.statusIn('valor de accion cero rechazado',
+  t.statusIn('valor de accion distinto del que fijo el grupo, rechazado',
     await post('/api/registrar-acciones',
-      { groupId: e8.groupId, date: '2026-08-01', shares: 3, shareValue: 0, interestRate: 2 }, e8.tokens.socio1), [400]);
+      { groupId: e8.groupId, date: '2026-08-01', shares: 3, shareValue: 0, interestRate: 2 }, e8.tokens.socio1), [409]);
+
+  // Y lo que de verdad importa: la fila guardada lleva SIEMPRE la cifra del
+  // grupo, no la que llego en la peticion.
+  await post('/api/registrar-acciones',
+    { groupId: e8.groupId, date: '2026-08-01', shares: 3 }, e8.tokens.socio1);
+  const ultimaAcc = (fake.dumpSheet('Acciones') || []).slice(-1)[0] || [];
+  t.near('se graba el valor de accion del grupo', Number(ultimaAcc[4]), 10, 0.001);
+  t.near('y el interes del grupo', Number(ultimaAcc[5]), 2, 0.001);
 
   const trasBasura = await get(`/api/savings/complete?email=${e8.users.socio1.email}&groupId=${e8.groupId}`, e8.tokens.socio1);
   t.eq('nada de eso ensucio el patrimonio', r2(trasBasura.body?.data?.totalAhorros), 1000);

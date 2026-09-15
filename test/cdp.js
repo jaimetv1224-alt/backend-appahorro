@@ -104,12 +104,16 @@ class Navegador {
     return new Promise((resolve, reject) => {
       this.pendientes.set(id, { resolve, reject });
       this.ws.send(JSON.stringify(paquete));
+      // 30 s se quedaban cortos en las auditorias largas, donde la pagina
+      // esta recargando mientras se evalua. Un tiempo agotado ahi parece un
+      // fallo del producto y no lo es.
+      const limite = method === 'Runtime.evaluate' ? 90000 : 45000;
       setTimeout(() => {
         if (this.pendientes.has(id)) {
           this.pendientes.delete(id);
-          reject(new Error(`Tiempo agotado en ${method}`));
+          reject(new Error(`Tiempo agotado en ${method} (limite ${limite / 1000}s)`));
         }
-      }, 30000);
+      }, limite);
     });
   }
 
@@ -144,6 +148,28 @@ class Navegador {
   /** Captura la pantalla y la guarda como PNG. */
   async capturar(rutaArchivo, { pantallaCompleta = false } = {}) {
     const opciones = { format: 'png', captureBeyondViewport: pantallaCompleta };
+    // Al capturar mas alla del viewport, Chrome rehace el diseno y REINICIA las
+    // animaciones CSS. Las pantallas con animacion de aparicion salian a medio
+    // desvanecer, casi ilegibles. Poner las animaciones a duracion cero las
+    // deja directamente en su estado final.
+    await this.enviar('Runtime.evaluate', {
+      expression: `
+        (() => {
+          let e = document.getElementById('__sin-animacion');
+          if (!e) {
+            e = document.createElement('style');
+            e.id = '__sin-animacion';
+            e.textContent = '*,*::before,*::after{animation-duration:0s !important;' +
+              'animation-delay:0s !important;transition-duration:0s !important;' +
+              'transition-delay:0s !important;}';
+            document.head.appendChild(e);
+          }
+          return 1;
+        })()
+      `,
+      returnByValue: true,
+    });
+    await dormir(120);
     if (pantallaCompleta) {
       // Los elementos fijos (la barra inferior de navegacion) quedarian flotando
       // en mitad de la imagen larga. Se ocultan solo mientras dura la captura.
@@ -170,6 +196,42 @@ class Navegador {
         returnByValue: true,
       });
     }
+    fs.mkdirSync(path.dirname(rutaArchivo), { recursive: true });
+    fs.writeFileSync(rutaArchivo, Buffer.from(data, 'base64'));
+    return rutaArchivo;
+  }
+
+  // Adjunta un archivo real a un <input type="file">, como si la persona lo
+  // hubiera elegido en el dialogo del sistema. Es la unica forma de probar de
+  // verdad una importacion: rellenar el estado a mano no ejercita el lector.
+  async adjuntar(selector, rutaArchivo) {
+    await this.enviar('DOM.enable');
+    const { root } = await this.enviar('DOM.getDocument', { depth: -1 });
+    const { nodeId } = await this.enviar('DOM.querySelector', {
+      nodeId: root.nodeId, selector,
+    });
+    if (!nodeId) throw new Error(`No se encontro el campo de archivo: ${selector}`);
+    await this.enviar('DOM.setFileInputFiles', {
+      nodeId,
+      files: [path.resolve(rutaArchivo)],
+    });
+    return true;
+  }
+
+  // Imprime la pagina a PDF con el motor de Chrome, que respeta el CSS de
+  // impresion (@page, saltos, break-inside) igual que el dialogo de imprimir.
+  async pdf(rutaArchivo, opciones = {}) {
+    const params = {
+      printBackground: true,
+      preferCSSPageSize: true,
+      marginTop: 0,
+      marginBottom: 0,
+      marginLeft: 0,
+      marginRight: 0,
+      displayHeaderFooter: false,
+      ...opciones,
+    };
+    const { data } = await this.enviar('Page.printToPDF', params);
     fs.mkdirSync(path.dirname(rutaArchivo), { recursive: true });
     fs.writeFileSync(rutaArchivo, Buffer.from(data, 'base64'));
     return rutaArchivo;

@@ -52,7 +52,10 @@ module.exports = async function run() {
   t.eq('obtener-acciones devuelve la fila historica', acciones.body?.shares?.length, 1);
 
   const utilidades = await get(`/api/obtener-utilidades?groupId=${groupId}&userEmail=${users.socio1.email}`, tokens.socio1);
-  t.eq('las acciones historicas devengan utilidades', utilidades.body?.utilities?.length, 1);
+  // Tener acciones no genera utilidades: el grupo reparte lo que cobro en
+  // intereses de prestamos, y en estos datos historicos no hay ninguno.
+  t.eq('las acciones historicas por si solas no generan utilidades',
+    utilidades.body?.utilities?.length, 0);
 
   const resumen = await get('/api/admin/resumen', tokens.admin);
   t.near('el resumen admin suma lo historico', Number(resumen.body?.resumen?.totalAhorros), 350.75);
@@ -68,10 +71,17 @@ module.exports = async function run() {
     tipo: 'prestamo', data: { Monto: 1000, Detalles: 'Plazo: 6', Group: groupId },
   }, tokens.socio1);
   t.status('el socio puede pedir credito con su ahorro historico', dentro, 201);
+
+  // Una solicitud sin resolver ya cuenta como prestamo comprometido, asi que se
+  // retira antes de probar el tope: es lo que haria una socia de verdad.
+  const idAbierta = ((fake.dumpSheet('SolicitudesPrestamos') || []).slice(1)[0] || [])[0];
+  await post('/api/retirar-solicitud', { tipo: 'prestamo', id: idAbierta }, tokens.socio1);
+
   const fuera = await post('/api/registrar-solicitud', {
     tipo: 'prestamo', data: { Monto: 1100, Detalles: 'Plazo: 6', Group: groupId },
   }, tokens.socio1);
   t.status('pero no por encima del cupo', fuera, 409);
+  t.eq('y por el motivo del cupo, no por otro', fuera.body?.codigo, 'SOBRE_CUPO');
   t.near('el cupo informado es 3x el ahorro historico', fuera.body?.cupoMaximo, 1052.25);
 
   // ===================================================================

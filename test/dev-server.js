@@ -33,6 +33,7 @@ const CABECERAS_EXTRA = {
 
 const CLAVE = 'Clave123';
 const GRUPO = 'DEMO-001';
+const GRUPO_NUEVO = 'DEMO-002';
 const HOY = new Date().toISOString();
 
 const GENTE = [
@@ -57,8 +58,20 @@ function sembrarDemo() {
   seedUser({ nombre: 'Administrador', email: 'admin@demo.test', password: CLAVE, role: 'admin' });
   GENTE.forEach(([nombre, email]) => seedUser({ nombre, email, password: CLAVE }));
 
+  // Registrada y SIN NINGUN GRUPO. Es el primer estado de toda socia: crea su
+  // cuenta y espera la invitacion. Ninguna prueba lo cubria, y es donde una
+  // pantalla se queda en blanco sin que nadie se entere.
+  seedUser({ nombre: 'Ana Suarez (sin grupo)', email: 'nadie@demo.test', password: CLAVE });
+
   seedGroup({ id: GRUPO, nombre: 'Caja de Ahorro El Progreso', presidente: 'rosa@demo.test', valorAccion: 10, interesMensual: 2 });
   GENTE.forEach(([, email, rol]) => seedLink(email, GRUPO, rol));
+
+  // Segundo grupo: RECIEN CREADO Y SIN CONFIGURAR (valor de accion e interes en
+  // blanco). Reproduce el caso real de un grupo que nace sin esas cifras, donde
+  // la app mostraba $0.00 y la compra de acciones fallaba con un error opaco.
+  seedGroup({ id: GRUPO_NUEVO, nombre: 'AHORRO JAIME (sin configurar)', presidente: 'rosa@demo.test', valorAccion: '', interesMensual: '' });
+  seedLink('rosa@demo.test', GRUPO_NUEVO, 'presidente');
+  seedLink('jose@demo.test', GRUPO_NUEVO, 'member');
 
   // --- Historial ya confirmado, para que nada arranque en cero ---
   const ahorros = { 'rosa@demo.test': 320, 'luis@demo.test': 280, 'nelly@demo.test': 240, 'jose@demo.test': 150, 'maria@demo.test': 190 };

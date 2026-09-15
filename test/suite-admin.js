@@ -8,7 +8,7 @@
  * con el administrador.
  */
 
-const { seedWorkbook, get, post, del, api, fake, BASE, anotar } = require('./harness');
+const { hoyLocal, PNG_PRUEBA, seedWorkbook, get, post, del, api, fake, BASE, anotar } = require('./harness');
 const { baseScenario, seedUser, login } = require('./scenario');
 const t = require('./runner');
 
@@ -46,17 +46,31 @@ module.exports = async function run() {
     t.status(`${ruta} con admin -> 200`, await api(metodo, ruta, { token: tokens.admin }), 200);
   }
 
+  // Escrituras que SI son del administrador de la plataforma: las que tocan la
+  // cuenta de una persona, no la caja de un grupo.
   const escriturasSoloAdmin = [
     ['POST', '/api/cambiar-rol-usuario', { email: 'socio1@juntago.test', nuevoRol: 'admin' }],
     ['POST', '/api/desactivar-usuario', { email: 'socio2@juntago.test' }],
     ['POST', '/api/activar-usuario', { email: 'socio2@juntago.test' }],
-    ['POST', '/api/registrar-prestamo-en-sheet', { LoanID: 'x', UserEmail: 'socio1@juntago.test', GroupID: 'G1', AmountApproved: 10 }],
   ];
   for (const [metodo, ruta, cuerpo] of escriturasSoloAdmin) {
     t.status(`${ruta} sin token -> 401`, await api(metodo, ruta, { body: cuerpo }), 401);
     t.status(`${ruta} con socio raso -> 403`, await api(metodo, ruta, { body: cuerpo, token: tokens.socio1 }), 403);
     t.status(`${ruta} con presidenta -> 403`, await api(metodo, ruta, { body: cuerpo, token: tokens.presi }), 403);
   }
+
+  // El alta directa de un prestamo es al reves: la concede la directiva DEL
+  // GRUPO. Estaba reservada al administrador de la plataforma y prohibida a la
+  // presidencia, que es exactamente lo contrario de lo que debe pasar.
+  const altaPrestamo = { LoanID: 'LN_MATRIZ', UserEmail: users.socio1.email, GroupID: groupId, Amount: 10 };
+  t.status('el alta directa de prestamo sin token -> 401',
+    await api('POST', '/api/registrar-prestamo-en-sheet', { body: altaPrestamo }), 401);
+  t.status('un socio raso no puede dar de alta un prestamo',
+    await api('POST', '/api/registrar-prestamo-en-sheet', { body: altaPrestamo, token: tokens.socio1 }), 403);
+  t.status('el admin de la plataforma tampoco, en un grupo ajeno',
+    await api('POST', '/api/registrar-prestamo-en-sheet', { body: altaPrestamo, token: tokens.admin }), 403);
+  t.statusIn('la presidencia del grupo si puede',
+    await api('POST', '/api/registrar-prestamo-en-sheet', { body: altaPrestamo, token: tokens.presi }), [200, 201]);
 
   t.status('DELETE /api/eliminar-grupo con socio raso -> 403',
     await del(`/api/eliminar-grupo/${groupId}`, tokens.socio1), 403);
@@ -162,31 +176,75 @@ module.exports = async function run() {
   form.append('amount', '120');
   form.append('userEmail', users.socio1.email);
   form.append('groupId', groupId);
-  form.append('paymentDate', '2026-08-22');
-  form.append('paymentImage', new Blob([Buffer.from('img')], { type: 'image/png' }), 'c.png');
+  form.append('paymentDate', hoyLocal());
+  form.append('paymentImage', new Blob([PNG_PRUEBA], { type: 'image/png' }), 'c.png');
   anotar('POST', '/api/upload-payment');
   const subida = await fetch(`${BASE}/api/upload-payment`, {
     method: 'POST', headers: { Authorization: `Bearer ${tokenSocio1}` }, body: form,
   });
   t.check('el socio sube su comprobante', subida.ok, `HTTP ${subida.status}`);
 
-  const pendientes = await get(`/api/pending-payments?groupId=${groupId}`, tokens.admin);
-  t.status('el admin ve los pagos por revisar', pendientes, 200);
+  // Los comprobantes los revisa la TESORERIA del grupo. El administrador de la
+  // plataforma no: no es su dinero. Antes esta prueba fijaba lo contrario y
+  // dejaba la puerta abierta con la bateria en verde.
+  t.status('el admin de la plataforma NO ve los pagos de un grupo ajeno',
+    await get(`/api/pending-payments?groupId=${groupId}`, tokens.admin), 403);
+
+  const pendientes = await get(`/api/pending-payments?groupId=${groupId}`, tokens.teso);
+  t.status('la tesoreria del grupo si los ve', pendientes, 200);
   const pagos = pendientes.body?.payments || pendientes.body?.pagos || [];
   const pagoId = pagos[0]?.paymentId || pagos[0]?.PaymentID || pagos[0]?.id;
   t.check('hay un pago pendiente', !!pagoId, JSON.stringify(pagos).slice(0, 200));
 
+  // --- La foto del comprobante ya no es publica --------------------------
+  // Hasta ahora ninguna prueba llegaba a DESCARGAR la foto: si la firma se
+  // rompiera del todo, la bateria seguiria en verde.
+  const urlFirmada = pagos[0]?.imagenUrl || '';
+  t.check('la tesoreria recibe la direccion ya firmada de la foto',
+    urlFirmada.includes('firma=') && urlFirmada.includes('vence='), urlFirmada);
+
+  anotar('GET', '/api/payment-image/x');
+  const conFirma = await fetch(BASE + urlFirmada);
+  const bytes = Buffer.from(await conFirma.arrayBuffer());
+  t.eq('y esa direccion abre la foto sin ninguna cabecera', conFirma.status, 200);
+  t.eq('   devolviendo la imagen entera', bytes.length, PNG_PRUEBA.length);
+  t.check('   con Cache-Control privado, para que ningun proxy la guarde',
+    (conFirma.headers.get('cache-control') || '').startsWith('private,'),
+    conFirma.headers.get('cache-control'));
+
+  const archivoDelPago = urlFirmada.split('?')[0].split('/').pop();
+  t.eq('sin firma y sin token, la misma foto ya no se baja',
+    (await fetch(`${BASE}/api/payment-image/${archivoDelPago}`)).status, 401);
+  t.eq('con el token de alguien ajeno al grupo, tampoco',
+    (await api('GET', `/api/payment-image/${archivoDelPago}`, { token: tokens.ajeno })).status, 403);
+
+  t.eq('cambiar una sola letra de la firma la invalida',
+    (await fetch(BASE + urlFirmada.slice(0, -1) + (urlFirmada.endsWith('A') ? 'B' : 'A'))).status, 403);
+  t.eq('alargar el vencimiento a mano tampoco cuela',
+    (await fetch(BASE + urlFirmada.replace(/vence=(\d+)/, (m, n) => `vence=${Number(n) + 86400}`))).status, 403);
+  // Comprobado en node v22.17.1: 22 letras acentuadas miden 22 caracteres pero
+  // 44 bytes, y timingSafeEqual lanza. Sin el filtro de forma, esto era un 500.
+  t.eq('una firma con letras acentuadas responde 403, no un 500 del servidor',
+    (await fetch(BASE + urlFirmada.replace(/firma=[^&]*/, 'firma=' + 'ñ'.repeat(22)))).status, 403);
+  // La direccion se repite dentro del bloque: es lo que hace que la cache del
+  // navegador acierte en vez de rebajar la foto en cada recarga de la lista.
+  const otraVez = await get(`/api/pending-payments?groupId=${groupId}`, tokens.teso);
+  t.eq('la direccion de la misma foto se repite entre dos cargas de la lista',
+    (otraVez.body?.payments || [])[0]?.imagenUrl, urlFirmada);
+
   t.status('un socio ajeno no puede aprobar el pago',
     await post('/api/approve-payment', { paymentId: pagoId, action: 'approve' }, tokens.ajeno), 403);
-  t.status('el admin lo rechaza',
-    await post('/api/approve-payment', { paymentId: pagoId, action: 'reject', notes: 'comprobante ilegible' }, tokens.admin), 200);
+  t.status('el admin de la plataforma tampoco puede resolverlo',
+    await post('/api/approve-payment', { paymentId: pagoId, action: 'approve' }, tokens.admin), 403);
+  t.status('la tesoreria lo rechaza',
+    await post('/api/approve-payment', { paymentId: pagoId, action: 'reject', notes: 'comprobante ilegible' }, tokens.teso), 200);
 
   const trasRechazo = await get(`/api/obtener-prestamos?groupId=${groupId}&userEmail=${users.socio1.email}`, tokens.admin);
   const prestamo = (trasRechazo.body?.loans || []).find((l) => l.loanId === loanId);
   t.near('un pago rechazado NO baja el saldo (300 a 6m al 2% = 336)', prestamo?.remainingBalance, 336);
 
   t.status('un pago ya resuelto no se vuelve a procesar',
-    await post('/api/approve-payment', { paymentId: pagoId, action: 'approve' }, tokens.admin), 409);
+    await post('/api/approve-payment', { paymentId: pagoId, action: 'approve' }, tokens.teso), 409);
   const trasReintento = await get(`/api/obtener-prestamos?groupId=${groupId}&userEmail=${users.socio1.email}`, tokens.admin);
   t.near('el saldo no se movio con el reintento',
     (trasReintento.body?.loans || []).find((l) => l.loanId === loanId)?.remainingBalance, 336);
@@ -201,16 +259,18 @@ module.exports = async function run() {
   t.check('y tambien su ruta en disco (columna J)',
     !!(filaPago?.[9] || '').toString(), `valor: "${filaPago?.[9]}"`);
   t.eq('el estado del comprobante quedo en la columna G', (filaPago?.[6] || '').toString(), 'rejected');
-  t.eq('y consta quien lo resolvio (columna M)', (filaPago?.[12] || '').toString(), users.admin.email);
+  t.eq('y consta que lo resolvio la tesoreria del grupo', (filaPago?.[12] || '').toString(), users.teso.email);
 
-  const salida = await api('GET', '/api/payment-image/..%2F..%2Fserver.js');
+  // Con token: sin el, el gate corta en 401 y estas dos comprobaciones pasarian
+  // sin llegar nunca a la defensa de la carpeta que dicen estar probando.
+  const salida = await api('GET', '/api/payment-image/..%2F..%2Fserver.js', { token: tokens.teso });
   t.check('no se puede salir de la carpeta de comprobantes (path traversal)',
-    salida.status >= 400 || !(salida.text || '').includes('express'),
+    salida.status >= 400 && salida.status !== 401 && !(salida.text || '').includes('express'),
     `HTTP ${salida.status}, cuerpo empieza con: ${(salida.text || '').slice(0, 60)}`);
 
-  const inexistente = await api('GET', '/api/payment-image/no-existe-12345.png');
+  const inexistente = await api('GET', '/api/payment-image/no-existe-12345.png', { token: tokens.teso });
   t.check('una imagen inexistente responde error, no el contenido de otra cosa',
-    inexistente.status >= 400, `HTTP ${inexistente.status}`);
+    inexistente.status >= 400 && inexistente.status !== 401, `HTTP ${inexistente.status}`);
 
   // ===================================================================
   t.section('ADM 7. Aportes del grupo (endpoint aparte)');
@@ -264,13 +324,27 @@ module.exports = async function run() {
   const miembrosGX = await get(`/api/obtener-miembros?groupId=GX`, e2.tokens.presi);
   t.status('obtener-miembros responde antes de borrar el grupo', miembrosGX, 200);
 
-  const antes = (fake.dumpSheet('Groups') || []).slice(1).length;
-  t.status('el admin elimina el grupo', await del('/api/eliminar-grupo/GX', e2.tokens.admin), 200);
-  const despues = (fake.dumpSheet('Groups') || []).slice(1).length;
-  t.eq('el grupo desaparece de la hoja Groups', despues, antes - 1);
+  // La baja es LOGICA. Borrar la fila dejaba los ahorros, las acciones y los
+  // prestamos del grupo sin dueño en la hoja: dinero huerfano que ya no se
+  // podia atribuir ni cuadrar. Y para el proyecto, borrar el grupo es perder
+  // el caso entero.
+  const ahorrosAntes = (fake.dumpSheet('Savings') || []).slice(1).filter((r) => r[1] === 'GX').length;
+  t.check('el grupo tenia movimientos antes de la baja', ahorrosAntes > 0, `${ahorrosAntes}`);
 
-  const enlacesGX = (fake.dumpSheet('UserGroupLinks') || []).slice(1).filter((r) => r[1] === 'GX');
-  t.eq('y no quedan vinculos huerfanos apuntando a el', enlacesGX.length, 0);
+  t.status('el admin da de baja el grupo', await del('/api/eliminar-grupo/GX', e2.tokens.admin), 200);
+
+  const filaGX = (fake.dumpSheet('Groups') || []).slice(1).find((r) => (r[0] || '') === 'GX');
+  t.check('el grupo sigue en la hoja, pero marcado', !!filaGX, 'la fila desaparecio');
+  t.eq('con estado eliminado', (filaGX?.[11] || '').toString().toLowerCase(), 'eliminado');
+
+  t.eq('sus movimientos NO se pierden',
+    (fake.dumpSheet('Savings') || []).slice(1).filter((r) => r[1] === 'GX').length, ahorrosAntes);
+
+  const listado = await get('/api/obtener-grupos', e2.tokens.admin);
+  t.check('y ya no aparece en el listado de grupos activos',
+    !((listado.body?.grupos || listado.body?.data || [])
+      .some((g) => (g.GroupID || g.groupId || g[0]) === 'GX')),
+    JSON.stringify(listado.body).slice(0, 200));
 
   t.status('eliminar un grupo inexistente responde 404',
     await del('/api/eliminar-grupo/NO-EXISTE', e2.tokens.admin), 404);

@@ -91,7 +91,11 @@ function seedWorkbook() {
     'ID', 'Email', 'GroupID', 'Nombre', 'MontoObjetivo', 'MontoActual',
     'FechaObjetivo', 'Descripcion', 'Prioridad', 'Categoria', 'Estado', 'FechaCreacion',
   ]]);
-  fake.seedSheet('AuditLog', [['UserEmail', 'Action', 'Target', 'Date']]);
+  // Las cinco de verdad. services/auditLogService.js define
+  // ['LogID','UserEmail','Action','Target','Date'] y reescribe A1:E1 en cuanto ve otra
+  // cosa; con cuatro columnas sembradas, cualquier prueba que leyera Action y Target
+  // miraba los indices 1 y 2 cuando estan en el 2 y el 3.
+  fake.seedSheet('AuditLog', [['LogID', 'UserEmail', 'Action', 'Target', 'Date']]);
 }
 
 // Cobertura: se anota cada peticion para saber al final que endpoints no toco
@@ -123,6 +127,18 @@ async function api(method, url, { token, body, raw } = {}) {
  * llamadas tambien cuenten en el informe de cobertura: antes se hacian con fetch
  * directo y el contador las daba por no probadas.
  */
+/**
+ * Un PNG de 1x1 de VERDAD.
+ *
+ * El servidor comprueba los primeros bytes del archivo subido, porque el tipo
+ * que declara el navegador se puede falsear (un shell.php enviado como
+ * image/png pasaba el filtro). Las pruebas tienen que subir una imagen real,
+ * como la subiria una socia con la camara del telefono.
+ */
+const PNG_PRUEBA = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64');
+
 async function postArchivo(url, campos, archivo, token) {
   anotar('POST', url);
   const form = new FormData();
@@ -139,6 +155,18 @@ async function postArchivo(url, campos, archivo, token) {
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch (e) { json = null; }
   return { status: res.status, body: json, text };
+}
+
+/**
+ * El dia de hoy en el CALENDARIO DE QUIEN USA LA APP, no en UTC.
+ *
+ * `new Date().toISOString().split('T')[0]` devuelve manana a partir de las 19:00
+ * en Ecuador (UTC-5). Las pruebas lo usaban como "hoy" y, como el servidor
+ * rechaza las fechas futuras, la bateria se ponia roja todas las tardes: medido,
+ * 20 fallas con el reloj a las 20:00 y 0 con el reloj a las 16:00.
+ */
+function hoyLocal(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 const get = (url, token) => api('GET', url, { token });
@@ -162,4 +190,4 @@ async function startServer() {
   if (!serverStarted) { loud(); throw new Error('El servidor de pruebas no arranco'); }
 }
 
-module.exports = { fake, seedWorkbook, api, get, post, put, del, postArchivo, startServer, quiet, loud, BASE, VERBOSE, cobertura, anotar };
+module.exports = { PNG_PRUEBA, hoyLocal, fake, seedWorkbook, api, get, post, put, del, postArchivo, startServer, quiet, loud, BASE, VERBOSE, cobertura, anotar };

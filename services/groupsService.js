@@ -1,5 +1,6 @@
 // CommonJS dependencies
 const { google } = require('googleapis');
+const { envolver: envolverHoja } = require('../hoja');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
@@ -68,7 +69,7 @@ async function getSheetsClient() {
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
   const client = await auth.getClient();
-  sheetsClient = google.sheets({ version: 'v4', auth: client });
+  sheetsClient = envolverHoja(google.sheets({ version: 'v4', auth: client }));
   return sheetsClient;
 }
 
@@ -133,6 +134,18 @@ async function createGroup(group) {
   const sheets = await getSheetsClient();
   await ensureGroupsHeader();
   if (!group.GroupName || !group.CreatedBy) throw new Error('Faltan datos obligatorios');
+
+  // Red de seguridad: dos grupos con el mismo identificador significan que
+  // quien creo el segundo queda como directivo del primero. Aunque el endpoint
+  // ya genera el identificador, esto cierra la puerta desde cualquier otra via.
+  if (group.GroupID) {
+    const yaExiste = await getGroupById(group.GroupID.toString().trim());
+    if (yaExiste) {
+      const e = new Error('Ya existe un grupo con ese identificador.');
+      e.codigo = 'GRUPO_DUPLICADO';
+      throw e;
+    }
+  }
   const headers = await getGroupsHeaders();
   const activeHeaders = Array.isArray(headers) && headers.length > 0 ? headers : GROUPS_HEADERS;
   const row = activeHeaders.map((h) => {

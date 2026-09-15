@@ -1,4 +1,5 @@
 const { google } = require('googleapis');
+const { envolver: envolverHoja } = require('../hoja');
 const fs = require('fs');
 const path = require('path');
 
@@ -70,7 +71,7 @@ class SavingsService {
       console.log('[SAVINGS SERVICE] GoogleAuth creado, obteniendo cliente...');
       const authClient = await this.auth.getClient();
       console.log('[SAVINGS SERVICE] Cliente de autenticación obtenido, creando cliente sheets...');
-      this.sheets = google.sheets({ version: 'v4', auth: authClient });
+      this.sheets = envolverHoja(google.sheets({ version: 'v4', auth: authClient }));
       this.isAvailable = true;
       console.log('[SAVINGS SERVICE] Google Sheets API autenticado correctamente.');
       return true;
@@ -230,9 +231,19 @@ class SavingsService {
       await this.createSavingsSheetIfNotExists(spreadsheetId);
       
       const { email, groupId, tipo, monto, descripcion, meta } = savingData;
-      
+
       const savingId = `SAV_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const fecha = new Date().toISOString();
+      // El DIA del aporte lo pone quien registra, no el reloj del servidor. Un
+      // banco comunal se reune una vez al mes y anota lo del mes: la tesorera
+      // teclea el aporte de marzo en abril. Antes se grababa siempre la fecha
+      // de hoy, y con el reparto mes a mes eso decide quien cobra.
+      // Y se usa el calendario LOCAL, no `toISOString()`: en Ecuador (UTC-5) la
+      // reunion del 31 de enero a las 19:30 quedaba fechada el 1 de febrero.
+      const diaLocal = (d = new Date()) => `${d.getFullYear()}-`
+        + `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const pedida = (savingData.fecha || '').toString().trim().slice(0, 10);
+      const diaDelAporte = /^\d{4}-\d{2}-\d{2}$/.test(pedida) ? pedida : diaLocal();
 
       // Hoja canonica: Savings con convencion posicional A=email,B=group,C=amount,D=date,E=type,F=descripcion
       // y columnas de control interno G=Estado, H=RegistradoPor, I=ResueltoPor, J=FechaEstado, K=MovID, L=Nota.
@@ -243,7 +254,7 @@ class SavingsService {
         email,
         groupId,
         toMoney(monto),
-        fecha.split('T')[0], // Solo la fecha (D=Date)
+        diaDelAporte,        // D=Date, el dia que declara quien registra
         tipo || 'mensual',   // E=Type
         sanitizeSheetCell(descripcion, 500), // F=Description (neutraliza formulas)
         estado,              // G=Estado
@@ -390,7 +401,10 @@ class SavingsService {
         extraAmount,
         goalAmount,
         totalTransactions: savings.length,
-        totalShares: shares.length,
+        // Devolvia el numero de FILAS de compra: con una compra de 100
+        // acciones decia "1". Ahora suma las acciones de verdad.
+        totalShares: shares.reduce((sum, x) => sum + (Number(
+          x.cantidad ?? x.acciones ?? x.shares ?? x.Cantidad ?? 0) || 0), 0),
         averageAmount: savings.length > 0 ? totalSavingsAmount / savings.length : 0,
         monthlyTrend,
         shares: shares,

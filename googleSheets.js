@@ -11,6 +11,7 @@
  */
 
 const { google } = require('googleapis');
+const { envolver: envolverHoja } = require('./hoja');
 const path = require('path');
 const fs = require('fs');
 
@@ -50,7 +51,7 @@ async function getGoogleSheetsClient() {
       credentials: credenciales,
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
-    return google.sheets({ version: 'v4', auth: await auth.getClient() });
+    return envolverHoja(google.sheets({ version: 'v4', auth: await auth.getClient() }));
   })().catch((error) => {
     clientePromesa = null; // permite reintentar en la siguiente llamada
     throw error;

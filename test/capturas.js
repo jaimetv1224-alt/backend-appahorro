@@ -20,6 +20,7 @@ process.env.TEST_PORT = '3001';
 const path = require('path');
 const { seedWorkbook, startServer, fake } = require('./harness');
 const { SHEETS } = require('../governance');
+const crypto = require('crypto');
 const { Navegador, dormir } = require('./cdp');
 
 const WEB = process.env.WEB_URL || 'http://localhost:5191';
@@ -135,9 +136,31 @@ async function principal() {
 
   // En el manual conviene ver la pantalla entera, no solo lo que cabe en la
   // ventana: por eso las capturas de escritorio van completas por defecto.
+  // Espera a que la pantalla este QUIETA antes de disparar. Sin esto, las
+  // pantallas con animacion de aparicion se capturan a medio desvanecer y
+  // salen lavadas, con el texto casi invisible.
+  // No basta con esperar a las animaciones declaradas: en varias pantallas los
+  // datos llegan DESPUES de esa comprobacion y la animacion de aparicion
+  // empieza entonces, asi que la foto salia a medio desvanecer. Lo unico
+  // fiable es mirar la pantalla hasta que deje de cambiar.
+  const esperarQuieto = async (intentos = 12) => {
+    let anterior = null;
+    let iguales = 0;
+    for (let i = 0; i < intentos; i += 1) {
+      const { data } = await nav.enviar('Page.captureScreenshot', { format: 'jpeg', quality: 40 });
+      const huella = crypto.createHash('md5').update(data).digest('hex');
+      iguales = huella === anterior ? iguales + 1 : 0;
+      anterior = huella;
+      if (iguales >= 2) break;   // dos lecturas seguidas identicas: ya esta quieta
+      await dormir(320);
+    }
+    await dormir(200);
+  };
+
   const foto = async (nombre, titulo, { completa = true } = {}) => {
     paso += 1;
     const archivo = path.join(SALIDA, `${String(paso).padStart(2, '0')}-${nombre}.png`);
+    await esperarQuieto();
     await nav.capturar(archivo, { pantallaCompleta: completa });
     capturas.push({ archivo, nombre, titulo });
     process.stdout.write(`  [${String(paso).padStart(2, '0')}] ${titulo}\n`);

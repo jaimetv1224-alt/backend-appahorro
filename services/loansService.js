@@ -52,13 +52,20 @@ async function createLoan(loan) {
     resource: { values: [row] },
   });
 
+  // Llamaba a `logAction`, que no existe en auditLogService (solo exporta
+  // `log`): el TypeError se lo tragaba el catch, asi que la creacion de
+  // prestamos NUNCA quedo registrada. Si alguien borraba la fila de Loans a
+  // mano, no habia rastro en ninguna parte para reconstruirla.
   try {
-    await auditLogService.logAction({
-      action: 'CREATE', entity: 'Loan', entityId: loan.LoanID,
-      performedBy: loan.UserEmail, details: JSON.stringify({ principal, term, rate, total, status }),
-      timestamp: new Date().toISOString(),
+    await auditLogService.log({
+      UserEmail: loan.UserEmail,
+      Action: 'CREATE Loan',
+      Target: `${loan.LoanID} ${JSON.stringify({ principal, term, rate, total, status })}`,
+      Date: new Date().toISOString(),
     });
-  } catch (e) { /* auditoría best-effort */ }
+  } catch (e) {
+    console.error('[loansService] no se pudo auditar la creacion del prestamo:', e.message);
+  }
   return response.data;
 }
 

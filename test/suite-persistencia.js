@@ -9,7 +9,7 @@
  * celda exacta y se vuelve a leer por la API.
  */
 
-const { seedWorkbook, get, post, put, del, fake, BASE, anotar } = require('./harness');
+const { hoyLocal, PNG_PRUEBA, seedWorkbook, get, post, put, del, fake, BASE, anotar } = require('./harness');
 const { baseScenario } = require('./scenario');
 const t = require('./runner');
 
@@ -249,8 +249,8 @@ module.exports = async function run() {
   form.append('amount', '50.25');
   form.append('userEmail', users.socio1.email);
   form.append('groupId', groupId);
-  form.append('paymentDate', '2026-08-21');
-  form.append('paymentImage', new Blob([Buffer.from('img')], { type: 'image/png' }), 'comp.png');
+  form.append('paymentDate', hoyLocal());
+  form.append('paymentImage', new Blob([PNG_PRUEBA], { type: 'image/png' }), 'comp.png');
   const resPago = await fetch(`${BASE}/api/upload-payment`, {
     method: 'POST', headers: { Authorization: `Bearer ${tokens.socio1}` }, body: form,
   });
@@ -261,7 +261,7 @@ module.exports = async function run() {
     1: users.socio1.email,
     2: solId,
     3: (v) => r2(v) === 50.25,
-    4: (v) => String(v).includes('2026-08-21'),
+    4: (v) => String(v).includes(hoyLocal()),
     6: (v) => String(v).toLowerCase().includes('pend'),
   });
 

@@ -277,7 +277,10 @@ module.exports = async function run() {
 
   const detFinal = await get(`/api/gob/asambleas/${asambleaId}`, tokens.presi);
   const sinVotos = detFinal.body?.acuerdos?.find((a) => a.acuerdoId === acuSinVotos.body.acuerdoId);
-  t.eq('al cerrar, el punto sin votos queda rechazado', sinVotos?.estado, 'rechazado');
+  // 'sin_resolver', no 'rechazado': nadie lo voto en contra. Decir "rechazado"
+  // de un punto que no se llego a votar es falso y ademas irreversible, porque
+  // un acuerdo rechazado ya no admite votos.
+  t.eq('al cerrar, el punto que nadie voto queda sin resolver', sinVotos?.estado, 'sin_resolver');
   t.eq('la asamblea queda cerrada', detFinal.body?.asamblea?.estado, 'cerrada');
 
   t.status('con la asamblea cerrada ya no se vota',

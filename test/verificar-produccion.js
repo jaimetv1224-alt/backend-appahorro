@@ -15,7 +15,7 @@
 
 const BASE = (process.argv[2] || 'https://backend-appahorro.onrender.com').replace(/\/+$/, '');
 const ORIGEN_WEB = (process.argv[3] || 'https://juntago.com').replace(/\/+$/, '');
-const VERSION_ESPERADA = '2026.08.26-control-interno';
+const VERSION_ESPERADA = '2026.09.03-separacion';
 
 const V = '\x1b[32m';
 const R = '\x1b[31m';

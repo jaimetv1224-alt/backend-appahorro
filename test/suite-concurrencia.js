@@ -12,7 +12,7 @@
  * verdad, como pasaria contra la API real.
  */
 
-const { seedWorkbook, get, post, fake, anotar } = require('./harness');
+const { hoyLocal, PNG_PRUEBA, seedWorkbook, get, post, fake, anotar } = require('./harness');
 const { baseScenario } = require('./scenario');
 const t = require('./runner');
 
@@ -271,8 +271,8 @@ module.exports = async function run() {
     form.append('amount', String(monto));
     form.append('userEmail', e5.users.socio1.email);
     form.append('groupId', e5.groupId);
-    form.append('paymentDate', '2026-08-20');
-    form.append('paymentImage', new Blob([Buffer.from('x')], { type: 'image/png' }), 'c.png');
+    form.append('paymentDate', hoyLocal());
+    form.append('paymentImage', new Blob([PNG_PRUEBA], { type: 'image/png' }), 'c.png');
     anotar('POST', '/api/upload-payment');
     const res = await fetch(`${BASE}/api/upload-payment`, {
       method: 'POST', headers: { Authorization: `Bearer ${e5.tokens.socio1}` }, body: form,
