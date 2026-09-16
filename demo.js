@@ -126,6 +126,14 @@ module.exports.register = function register(app, ctx) {
       acciones.forEach((f) => clasificar(f, ACC.id, ACC.group));
       prestamos.forEach((f) => clasificar(f, LOAN.id, LOAN.group));
 
+      // Grupos donde alguien YA compro acciones. Ahi el valor de la accion no
+      // se toca: cambiarlo reescribiria el patrimonio de gente real.
+      const conAcciones = new Set();
+      acciones.forEach((f) => {
+        const gid = normalizeGroupKey(f[ACC.group]);
+        if (gid && Number(f[ACC.cantidad]) > 0) conAcciones.add(gid);
+      });
+
       // Socias y cargos por grupo.
       const porGrupo = new Map();
       vinculos.forEach((f, i) => {
@@ -157,17 +165,61 @@ module.exports.register = function register(app, ctx) {
           saltados.push({ grupo: g[GRP.nombre] || gid, motivo: 'no tiene socias' });
           continue;
         }
+        const azar = azarDe(gid);
+        const filaGrupo = grupos.indexOf(g) + 2;
+
+        // ---- EL REGLAMENTO SE PUEDE PONER SIEMPRE -------------------------
+        // Configurar no es sembrar dinero. Un grupo sin valor de accion ni
+        // interes no puede operar aunque tenga socias, asi que esto se aplica
+        // tambien a los grupos que ya llevan movimiento de verdad. Con dos
+        // salvedades: el valor de la accion NO se toca si alguien ya compro
+        // acciones (le cambiaria el patrimonio), y ni el interes ni el aporte
+        // pisan un valor que el grupo ya haya decidido.
+        const reglamento = [];
+        if (!conAcciones.has(gid) && Number(g[GRP.valorAccion]) !== valorAccion) {
+          cambiosGrupo.push({ fila: filaGrupo, col: GRP.valorAccion, valor: valorAccion });
+          reglamento.push(`accion $${valorAccion}`);
+        }
+        if (!Number(g[GRP.interes])) {
+          cambiosGrupo.push({ fila: filaGrupo, col: GRP.interes, valor: interesMensual });
+          reglamento.push(`interes ${interesMensual}%`);
+        }
+        if (!Number(g[GRP.aporte])) {
+          cambiosGrupo.push({ fila: filaGrupo, col: GRP.aporte, valor: aporteBase });
+          reglamento.push(`aporte $${aporteBase}`);
+        }
+
+        // ---- LA DIRECTIVA VACIA TAMBIEN ----------------------------------
+        const cargosAsignados = [];
+        for (const cargo of CARGOS) {
+          if (datos.cargos.has(cargo)) continue;
+          const libre = datos.socias.find((x) => x.rol === 'member'
+            && !cargosAsignados.some((c) => c.email === x.email));
+          if (!libre) break;
+          cambiosRol.push({ fila: libre.fila, rol: cargo });
+          cargosAsignados.push({ cargo, email: libre.email });
+          datos.cargos.set(cargo, libre.email);
+          libre.rol = cargo;
+        }
+
+        // ---- EL DINERO, SOLO SI EL GRUPO ESTA VIRGEN ----------------------
         if (conDineroReal.has(gid)) {
-          saltados.push({ grupo: g[GRP.nombre] || gid, motivo: 'ya tiene movimiento de verdad, no se toca' });
+          saltados.push({
+            grupo: g[GRP.nombre] || gid,
+            motivo: 'ya tiene movimiento de verdad: no se le siembra nada',
+            reglamento, cargosAsignados: cargosAsignados.map((c) => `${c.cargo}: ${c.email}`),
+          });
           continue;
         }
-        // Sembrar dos veces duplicaria todo. Para rehacerlo: limpiar y sembrar.
         if (yaSembrado.has(gid)) {
-          saltados.push({ grupo: g[GRP.nombre] || gid, motivo: 'ya tiene la demostracion sembrada' });
+          saltados.push({
+            grupo: g[GRP.nombre] || gid,
+            motivo: 'ya tiene la demostracion sembrada',
+            reglamento, cargosAsignados: cargosAsignados.map((c) => `${c.cargo}: ${c.email}`),
+          });
           continue;
         }
 
-        const azar = azarDe(gid);
         orden += 1;
 
         // Cada grupo arranca en un mes distinto: enero, marzo, abril...
@@ -177,31 +229,11 @@ module.exports.register = function register(app, ctx) {
         const anioIni = hoy.getFullYear();
         const meses = mesesHasta(anioIni, mesIni, hoy);
 
-        // --- reglamento del grupo ----------------------------------------
-        const filaGrupo = grupos.indexOf(g) + 2;
-        cambiosGrupo.push({ fila: filaGrupo, col: GRP.valorAccion, valor: valorAccion });
-        if (!Number(g[GRP.interes])) {
-          cambiosGrupo.push({ fila: filaGrupo, col: GRP.interes, valor: interesMensual });
-        }
-        if (!Number(g[GRP.aporte])) {
-          cambiosGrupo.push({ fila: filaGrupo, col: GRP.aporte, valor: aporteBase });
-        }
+        // La fecha de arranque solo se pone al sembrar: en un grupo que ya
+        // opera de verdad seria reescribir cuando empezo.
         cambiosGrupo.push({
           fila: filaGrupo, col: GRP.inicio, valor: `${anioIni}-${dosDigitos(mesIni)}-01`,
         });
-
-        // --- directiva, solo los puestos vacios ---------------------------
-        const cargosAsignados = [];
-        for (const cargo of CARGOS) {
-          if (datos.cargos.has(cargo)) continue;
-          const libre = datos.socias.find((s) => s.rol === 'member'
-            && !cargosAsignados.some((c) => c.email === s.email));
-          if (!libre) break;
-          cambiosRol.push({ fila: libre.fila, rol: cargo });
-          cargosAsignados.push({ cargo, email: libre.email });
-          datos.cargos.set(cargo, libre.email);
-          libre.rol = cargo;
-        }
 
         // --- aportes mes a mes -------------------------------------------
         let nAportes = 0;

@@ -204,6 +204,60 @@ module.exports = async function run() {
   t.eq('no se sembro nada', cuerpo('Savings').filter((f) => esDemo(f[10])).length, 0);
 
   // ===================================================================
+  t.section('DEM 9. Configurar no es sembrar: el reglamento si se pone');
+  // ===================================================================
+  // Un grupo sin valor de accion ni interes no puede operar aunque tenga
+  // socias, y saltarlo entero por tener un aporte de verdad lo dejaba
+  // inservible. El reglamento se pone igual; el dinero no.
+  preparar();
+  e = await baseScenario({ groupId: 'DM9' });
+  // Grupo con un aporte REAL, sin reglamento y sin directiva.
+  seedUser({ nombre: 'Real Uno', email: 'r1@demo.test' });
+  seedUser({ nombre: 'Real Dos', email: 'r2@demo.test' });
+  seedUser({ nombre: 'Real Tres', email: 'r3@demo.test' });
+  seedGroup({ id: 'DM9R', nombre: 'Opera de verdad', presidente: '', valorAccion: 0, interesMensual: 0 });
+  ['r1@demo.test', 'r2@demo.test', 'r3@demo.test'].forEach((c) => seedLink(c, 'DM9R', 'member'));
+  fake.ensureSheet('Savings').grid.push([
+    'r1@demo.test', 'DM9R', 77, '2026-02-10', 'mensual', 'aporte de verdad',
+    'confirmado', 'a@a.test', 'b@b.test', new Date().toISOString(), 'sav_real_77', '',
+  ]);
+  hoja.invalidarTodo();
+
+  r = await post('/api/admin/demo/sembrar', { valorAccion: 15 }, e.tokens.admin);
+  const filaDM9R = filasDe('Groups').find((f) => f[0] === 'DM9R');
+  t.eq('al grupo que ya opera se le pone el valor de la accion', Number(filaDM9R[15]), 15);
+  t.check('y el interes, que estaba en cero', Number(filaDM9R[16]) > 0, `${filaDM9R[16]}`);
+  t.eq('tambien se le completa la directiva',
+    filasDe('UserGroupLinks').filter((f) => f[1] === 'DM9R' && f[3] !== 'member').length, 3);
+  t.eq('pero NO se le siembra ni un aporte',
+    cuerpo('Savings').filter((f) => f[1] === 'DM9R').length, 1);
+  t.check('y se dice que se le puso el reglamento',
+    (r.body.saltados || []).some((x) => (x.reglamento || []).length > 0),
+    JSON.stringify(r.body.saltados));
+
+  // ===================================================================
+  t.section('DEM 10. Donde ya se compraron acciones, el valor NO se cambia');
+  // ===================================================================
+  // Es el limite fino: cambiarle el valor de la accion a un grupo que ya tiene
+  // acciones compradas le reescribe el patrimonio a gente real.
+  preparar();
+  e = await baseScenario({ groupId: 'DMA' });
+  seedUser({ nombre: 'Accionista', email: 'acc@demo.test' });
+  seedGroup({ id: 'DMAC', nombre: 'Con acciones', presidente: 'acc@demo.test', valorAccion: 8 });
+  seedLink('acc@demo.test', 'DMAC', 'presidente');
+  fake.ensureSheet('Acciones').grid.push([
+    'acc@demo.test', 'DMAC', '2026-03-10', 10, 8, 2, new Date().toISOString(),
+    'confirmado', 'a@a.test', 'b@b.test', new Date().toISOString(), 'acc_real_1', 'compra real',
+  ]);
+  hoja.invalidarTodo();
+
+  await post('/api/admin/demo/sembrar', { valorAccion: 15 }, e.tokens.admin);
+  const filaDMAC = filasDe('Groups').find((f) => f[0] === 'DMAC');
+  t.eq('la accion sigue valiendo lo que valia', Number(filaDMAC[15]), 8);
+  t.eq('y la compra real sigue intacta',
+    cuerpo('Acciones').filter((f) => f[1] === 'DMAC' && f[11] === 'acc_real_1').length, 1);
+
+  // ===================================================================
   t.section('DEM 8. Lo sembrado se ve en el informe del proyecto');
   // ===================================================================
   // Si el ahorro sembrado no llegara al informe, la demostracion no serviria
