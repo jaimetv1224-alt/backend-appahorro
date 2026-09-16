@@ -307,11 +307,113 @@ module.exports = async function run() {
   r = await post('/api/admin/demo/limpiar', {}, e.tokens.admin);
   const llamadas = fake.store.calls.batchUpdate - antesLlamadas;
   t.status('limpiar responde', r, 200);
+  // Lo que se fija es la FORMA del coste: una llamada por hoja (son 11), no
+  // una por fila. Con mil filas la diferencia es entre tres segundos y nunca.
   t.check('con una llamada por hoja, no una por fila',
-    llamadas <= 4, `hizo ${llamadas} llamadas para ${cuantasFilas} filas`);
+    llamadas <= 12, `hizo ${llamadas} llamadas para ${cuantasFilas} filas de aportes`);
+  t.check('y muchas menos llamadas que filas borradas',
+    llamadas < cuantasFilas, `${llamadas} llamadas vs ${cuantasFilas} filas`);
   t.eq('y no queda nada sembrado', cuerpo('Savings').filter((f) => esDemo(f[10])).length, 0);
   t.eq('ni una solicitud suelta',
     cuerpo('SolicitudesPrestamos').filter((f) => esDemo(f[0])).length, 0);
+
+  // ===================================================================
+  t.section('DEM 13. Las entradas a la app: el embudo deja de estar vacio');
+  // ===================================================================
+  // Sin accesos sembrados el informe decia "0 de 19 grupos han entrado" y el
+  // embudo de adopcion, que es el indicador central del proyecto, salia en
+  // blanco. Tampoco se podia medir cuanto tardan en entrar la primera vez.
+  preparar();
+  e = await baseScenario({ groupId: 'DMD' });
+  const acc = require('../accesos');
+  fake.seedSheet(acc.HOJA, [acc.CABECERA]);
+  hoja.invalidarTodo();
+  await post('/api/admin/demo/sembrar', {}, e.tokens.admin);
+
+  const entradas = cuerpo(acc.HOJA).filter((f) => (f[7] || '') === 'demo');
+  t.check('se sembraron entradas a la app', entradas.length > 0, `${entradas.length}`);
+  t.check('de varias personas distintas',
+    new Set(entradas.map((f) => f[1])).size > 1,
+    `${new Set(entradas.map((f) => f[1])).size} personas`);
+  t.check('pero NO de todas: quien nunca entro tambien es un dato',
+    new Set(entradas.map((f) => f[1])).size
+      < filasDe('UserGroupLinks').filter((f) => f[1] === 'DMD').length + 5, '');
+  t.check('desde varios aparatos',
+    new Set(entradas.map((f) => f[2])).size >= 1, JSON.stringify([...new Set(entradas.map((f) => f[2]))]));
+  t.check('con fechas repartidas, no todas el mismo dia',
+    new Set(entradas.map((f) => (f[0] || '').slice(0, 10))).size > 3,
+    `${new Set(entradas.map((f) => (f[0] || '').slice(0, 10))).size} dias distintos`);
+  t.check('y ninguna en el futuro',
+    entradas.every((f) => new Date(f[0]) <= new Date()), '');
+
+  // ===================================================================
+  t.section('DEM 14. La app no puede salir mas lenta que el cuaderno');
+  // ===================================================================
+  // Fallo real: los aportes se sembraban con la hora de confirmacion en AHORA,
+  // asi que un aporte de marzo salia confirmado noventa dias despues y el
+  // informe del proyecto concluia "mas lento que en papel". Es justo la cifra
+  // que se le ensena al INCYT.
+  const aportesD = cuerpo('Savings').filter((f) => esDemo(f[10]));
+  t.check('hay aportes sembrados', aportesD.length > 0, '');
+  const demoras = aportesD.map((f) => {
+    const puesto = new Date(`${f[3]}T00:00:00Z`).getTime();
+    const confirmado = new Date(f[9]).getTime();
+    return (confirmado - puesto) / 86400000;
+  });
+  const peor = Math.max(...demoras);
+  t.check('ninguno tarda mas de cuatro dias en confirmarse',
+    peor <= 4, `el peor tardo ${peor.toFixed(1)} dias`);
+  t.check('y ninguno se confirma ANTES de hacerse',
+    Math.min(...demoras) >= 0, `el minimo fue ${Math.min(...demoras).toFixed(1)}`);
+
+  // ===================================================================
+  t.section('DEM 15. Prestamos resueltos, pagados y con acta');
+  // ===================================================================
+  const creditosD = cuerpo('Loans').filter((f) => esDemo(f[0]));
+  const aprobaciones = cuerpo('AprobacionesAsamblea').filter((f) => esDemo(f[0]));
+  t.check('cada prestamo tiene al menos dos votos de la directiva',
+    creditosD.every((c) => aprobaciones.filter((v) => v[0] === c[0]).length >= 2),
+    JSON.stringify(creditosD.map((c) => [c[0], aprobaciones.filter((v) => v[0] === c[0]).length])));
+  t.check('y el voto lleva la hora, que es de donde sale el tiempo de respuesta',
+    aprobaciones.every((v) => /^\d{4}-\d{2}-\d{2}T/.test(v[6] || '')),
+    JSON.stringify(aprobaciones[0]));
+
+  const pagos = cuerpo('LoanPayments').filter((f) => esDemo(f[0]));
+  t.check('hay cuotas pagadas', pagos.length > 0, `${pagos.length}`);
+  t.check('todas aprobadas', pagos.every((f) => f[6] === 'approved'), '');
+  t.check('y de prestamos que existen',
+    pagos.every((f) => creditosD.some((c) => c[0] === f[2])), '');
+
+  const asambleas = cuerpo('Asambleas').filter((f) => esDemo(f[0]));
+  const asistencia = cuerpo('AsambleaAsistencia').filter((f) => esDemo(f[0]));
+  const acuerdos = cuerpo('Acuerdos').filter((f) => esDemo(f[0]));
+  const votos = cuerpo('AcuerdoVotos').filter((f) => esDemo(f[0]));
+  t.check('hay asambleas cerradas', asambleas.length > 0 && asambleas.every((f) => f[5] === 'cerrada'),
+    JSON.stringify(asambleas.map((f) => f[5])));
+  t.check('con su lista de asistencia', asistencia.length > 0, `${asistencia.length}`);
+  t.check('y con acuerdos aprobados y votados',
+    acuerdos.length > 0 && acuerdos.every((f) => f[7] === 'aprobado') && votos.length > 0,
+    JSON.stringify({ acuerdos: acuerdos.length, votos: votos.length }));
+
+  // ===================================================================
+  t.section('DEM 16. Limpiar se lleva tambien las entradas y las actas');
+  // ===================================================================
+  hoja.invalidarTodo();
+  r = await post('/api/admin/demo/limpiar', {}, e.tokens.admin);
+  t.status('limpiar responde', r, 200);
+  for (const [etiqueta, nombre, col] of [
+    ['entradas a la app', acc.HOJA, 7],
+    ['pagos de cuota', 'LoanPayments', 0],
+    ['votos de prestamo', 'AprobacionesAsamblea', 0],
+    ['asambleas', 'Asambleas', 0],
+    ['asistencias', 'AsambleaAsistencia', 0],
+    ['acuerdos', 'Acuerdos', 0],
+    ['votos de acuerdo', 'AcuerdoVotos', 0],
+  ]) {
+    const quedan = cuerpo(nombre).filter((f) => (nombre === acc.HOJA
+      ? (f[col] || '') === 'demo' : esDemo(f[col]))).length;
+    t.eq(`no quedan ${etiqueta}`, quedan, 0);
+  }
 
   // ===================================================================
   t.section('DEM 8. Lo sembrado se ve en el informe del proyecto');

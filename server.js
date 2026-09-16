@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.16-demo-limpieza';
+const BACKEND_VERSION = '2026.09.16-demo-accesos';
 
 let gobApi = null;
 
@@ -8236,6 +8236,10 @@ require('./demo').register(app, {
     bloquear,
     responderSiEsCuota,
     linkIsActive,
+    ensureSheetExists,
+    cabeceraDePagos: LOAN_PAYMENTS_HEADERS,
+    hojaAccesos: acc.HOJA,
+    cabeceraAccesos: acc.CABECERA,
 });
 console.log('[BACKEND] Datos de demostracion registrados (/api/admin/demo/*).');
 

@@ -79,11 +79,49 @@ const mesesHasta = (anioIni, mesIni, hoy) => {
 
 const esDeDemo = (valor) => (valor || '').toString().trim().toLowerCase().startsWith(PREFIJO);
 
+/** Una fecha 'YYYY-MM-DD' mas N dias (y unas horas), como instante ISO. */
+const masDias = (ymd, dias, hora = 10) => {
+  const [a, m, d] = String(ymd).split('-').map(Number);
+  return new Date(Date.UTC(a, m - 1, d + dias, hora, 0, 0)).toISOString();
+};
+const soloFecha = (iso) => String(iso).slice(0, 10);
+
 module.exports.register = function register(app, ctx) {
   const {
     getSheetsClient, SPREADSHEET_ID, normalizeEmailKey, normalizeGroupKey,
     normalizeGroupRole, requireAdmin, bloquear, responderSiEsCuota, linkIsActive,
+    ensureSheetExists, cabeceraDePagos, hojaAccesos, cabeceraAccesos,
   } = ctx;
+
+  // TODO EL BACKEND LEE DESDE LA FILA 2. Una pestana recien creada por un
+  // append no tiene cabecera, asi que su PRIMERA fila de datos queda invisible
+  // para todos: el informe la salta, el panel no la cuenta, y nadie se entera.
+  // Paso de verdad aqui: un prestamo aparecia con un solo voto de la directiva
+  // porque el primero se habia perdido por este agujero.
+  const G = require('./governance').SHEETS;
+  const CABECERAS = {
+    SolicitudesPrestamos: ['ID', 'UserEmail', 'Group', 'GroupRole', 'Monto', 'Estado',
+      'Fecha', 'Detalles', 'AprobadoPor', 'TasaInteres'],
+    AprobacionesAsamblea: ['SolicitudID', 'Tipo', 'GrupoID', 'AprobadoPor', 'RolAprobador',
+      'Decision', 'Fecha', 'Comentario'],
+    LoanPayments: cabeceraDePagos,
+    [hojaAccesos]: cabeceraAccesos,
+    [G.asambleas.name]: G.asambleas.headers,
+    [G.asistencia.name]: G.asistencia.headers,
+    [G.acuerdos.name]: G.acuerdos.headers,
+    [G.votos.name]: G.votos.headers,
+  };
+
+  /** Deja la pestana con su cabecera antes de anadirle nada. */
+  async function asegurar(sheetsClient, nombre) {
+    const cab = CABECERAS[nombre];
+    if (!cab || typeof ensureSheetExists !== 'function') return;
+    try {
+      await ensureSheetExists(nombre, cab, sheetsClient, SPREADSHEET_ID);
+    } catch (e) {
+      console.error('[DEMO] no se pudo asegurar la cabecera de', nombre, e.message);
+    }
+  }
 
   /** Lee un rango; si la pestana no existe devuelve vacio en vez de reventar. */
   async function leer(sheetsClient, rango) {
@@ -156,6 +194,13 @@ module.exports.register = function register(app, ctx) {
       // los prestamos leyendo esa hoja, no Loans. Sembrar solo el prestamo
       // dejaba el tablero marcando $0 con 27 creditos vivos.
       const filasSolicitudes = [];
+      const filasAprobaciones = [];   // AprobacionesAsamblea: da la hora de la decision
+      const filasPagos = [];          // LoanPayments
+      const filasAccesos = [];        // Accesos: quien entro, cuando y desde que aparato
+      const filasAsambleas = [];
+      const filasAsistencia = [];
+      const filasAcuerdos = [];
+      const filasVotos = [];
       const cambiosGrupo = [];
       const cambiosRol = [];
       const informe = [];
@@ -251,10 +296,15 @@ module.exports.register = function register(app, ctx) {
             if (azar() < 0.08) return;            // ese mes no aporto
             const dia = 3 + Math.floor(azar() * 20);
             const id = `${PREFIJO}sav_${gid.slice(0, 6)}_${idx}_${a}${dosDigitos(m)}`;
+            const cuando = `${a}-${dosDigitos(m)}-${dosDigitos(dia)}`;
+            // La tesoreria confirma al dia siguiente o a los dos dias. Poner
+            // aqui la hora de AHORA daba medianas de noventa dias y el informe
+            // concluia que la app tardaba mas que el cuaderno de papel.
             filasAhorro.push([
-              s.email, gid, cuota, `${a}-${dosDigitos(m)}-${dosDigitos(dia)}`, 'mensual',
+              s.email, gid, cuota, cuando, 'mensual',
               `Aporte mensual ${MARCA}`, 'confirmado', s.email,
-              datos.cargos.get('tesorero') || s.email, new Date().toISOString(), id, '',
+              datos.cargos.get('tesorero') || s.email,
+              masDias(cuando, 1 + Math.floor(azar() * 2), 9 + Math.floor(azar() * 8)), id, '',
             ]);
             ahorroDe.set(s.email, (ahorroDe.get(s.email) || 0) + cuota);
             nAportes += 1;
@@ -268,10 +318,11 @@ module.exports.register = function register(app, ctx) {
           const cuantas = 1 + Math.floor(azar() * 4);
           const { a, m } = meses[Math.floor(azar() * meses.length)];
           const id = `${PREFIJO}acc_${gid.slice(0, 6)}_${idx}`;
+          const cuandoAcc = `${a}-${dosDigitos(m)}-10`;
           filasAcciones.push([
-            s.email, gid, `${a}-${dosDigitos(m)}-10`, cuantas, valorAccion, interesMensual,
-            new Date().toISOString(), 'confirmado', s.email,
-            datos.cargos.get('tesorero') || s.email, new Date().toISOString(), id,
+            s.email, gid, cuandoAcc, cuantas, valorAccion, interesMensual,
+            masDias(cuandoAcc, 0), 'confirmado', s.email,
+            datos.cargos.get('tesorero') || s.email, masDias(cuandoAcc, 1), id,
             `Compra de acciones ${MARCA}`,
           ]);
           nAcciones += 1;
@@ -279,7 +330,13 @@ module.exports.register = function register(app, ctx) {
 
         // --- uno o dos prestamos vivos ------------------------------------
         let nPrestamos = 0;
-        const candidatas = datos.socias
+        // El reglamento pide dos de tres firmas de la directiva para aprobar un
+        // credito. Un grupo que no las tiene no puede aprobar nada, asi que
+        // tampoco se le siembran prestamos: saldrian con un solo voto.
+        const firmantes = CARGOS
+          .map((c) => ({ cargo: c, email: datos.cargos.get(c) }))
+          .filter((x) => x.email);
+        const candidatas = firmantes.length < 2 ? [] : datos.socias
           .filter((s) => (ahorroDe.get(s.email) || 0) >= 60)
           .slice(0, 2 + Math.floor(azar() * 2));
         candidatas.forEach((s, idx) => {
@@ -299,8 +356,97 @@ module.exports.register = function register(app, ctx) {
             `Prestamo a ${plazo} meses ${MARCA}`,
             datos.cargos.get('presidente') || s.email, interesMensual,
           ]);
+          // La hoja de solicitudes no guarda cuando se decidio: esa hora vive
+          // en el voto de la directiva, y sin ella el informe no puede medir
+          // cuanto se tarda en resolver un prestamo.
+          const decidido = 1 + Math.floor(azar() * 3);
+          const cuantasFirmas = Math.min(firmantes.length, 2 + Math.floor(azar() * 2));
+          firmantes.slice(0, cuantasFirmas).forEach((f) => {
+            filasAprobaciones.push([
+              idPrestamo, 'prestamo', gid, f.email, f.cargo, 'aprobado',
+              masDias(fechaPrestamo, decidido, 18), `Aprobado en asamblea ${MARCA}`,
+            ]);
+          });
+
+          // Cuotas ya pagadas, con su comprobante revisado.
+          const cuotasPagadas = Math.min(plazo - 1, 1 + Math.floor(azar() * 3));
+          const cuota = Math.round((total / plazo) * 100) / 100;
+          for (let k = 1; k <= cuotasPagadas; k += 1) {
+            const fPago = soloFecha(masDias(fechaPrestamo, 30 * k));
+            filasPagos.push([
+              `${PREFIJO}pay_${gid.slice(0, 6)}_${idx}_${k}`, s.email, idPrestamo, cuota, fPago,
+              `Cuota ${k} de ${plazo} ${MARCA}`, 'approved', '', '', '', '',
+              masDias(fPago, 0, 9), datos.cargos.get('tesorero') || s.email,
+              masDias(fPago, 1, 11), `Revisado ${MARCA}`,
+            ]);
+          }
           nPrestamos += 1;
         });
+
+        // --- quien entro a la app, cuando y desde donde -------------------
+        // Sin esto el informe decia "0 de 19 grupos han entrado" y el embudo de
+        // adopcion, que es el indicador central del proyecto, salia vacio.
+        const APARATOS = [['movil', 'Android', 'Chrome'], ['movil', 'Android', 'Chrome'],
+          ['movil', 'iOS', 'Safari'], ['escritorio', 'Windows 10/11', 'Chrome']];
+        let nEntradas = 0;
+        let nQueEntraron = 0;
+        datos.socias.forEach((s, idx) => {
+          if (azar() > 0.72) return;                    // no todas llegan a entrar
+          nQueEntraron += 1;
+          const aparato = APARATOS[Math.floor(azar() * APARATOS.length)];
+          const primera = 2 + Math.floor(azar() * 25);  // dias desde que arranco el grupo
+          const cuantas = 1 + Math.floor(azar() * 14);
+          const constante = azar() < 0.55;              // si sigue entrando hasta hoy
+          const diasDeVida = Math.round((hoy - new Date(`${anioIni}-${dosDigitos(mesIni)}-01T00:00:00Z`)) / 86400000);
+          const ventana = constante ? diasDeVida : Math.round(diasDeVida * (0.3 + azar() * 0.4));
+          for (let k = 0; k < cuantas; k += 1) {
+            const dia = Math.min(diasDeVida - 1, primera + Math.floor((ventana - primera) * (k / Math.max(1, cuantas - 1))));
+            if (dia < 0) continue;
+            filasAccesos.push([
+              masDias(`${anioIni}-${dosDigitos(mesIni)}-01`, dia, 7 + Math.floor(azar() * 13)),
+              s.email, aparato[0], aparato[1], aparato[2], '190.0.0.1',
+              `${aparato[2]} ${MARCA}`, 'demo',
+            ]);
+            nEntradas += 1;
+          }
+        });
+
+        // --- una asamblea cerrada, con su asistencia y su acuerdo votado ---
+        const presi = datos.cargos.get('presidente');
+        let nAsambleas = 0;
+        if (presi && meses.length >= 2) {
+          const { a: aA, m: mA } = meses[Math.max(0, meses.length - 2)];
+          const fAsa = `${aA}-${dosDigitos(mA)}-15`;
+          const idAsa = `${PREFIJO}asa_${gid.slice(0, 6)}`;
+          filasAsambleas.push([
+            idAsa, gid, `Asamblea mensual ${MARCA}`, fAsa, 'presencial', 'cerrada',
+            'Aportes, prestamos y utilidades', presi, masDias(fAsa, -7),
+            masDias(fAsa, 0, 18), masDias(fAsa, 0, 20), presi, '', MARCA,
+          ]);
+          let asistentes = 0;
+          datos.socias.forEach((s) => {
+            const vino = azar() < 0.78;
+            if (vino) asistentes += 1;
+            filasAsistencia.push([
+              idAsa, gid, s.email, vino ? 'presente' : 'ausente', presi, masDias(fAsa, 0, 18),
+            ]);
+          });
+          const idAcu = `${PREFIJO}acu_${gid.slice(0, 6)}`;
+          const aFavor = Math.max(1, Math.round(asistentes * 0.85));
+          filasAcuerdos.push([
+            idAcu, idAsa, gid, 'cambio_reglas', `Confirmar el reglamento del ciclo ${MARCA}`,
+            `Valor de la accion en $${valorAccion} e interes del ${interesMensual}% mensual`,
+            '{}', 'aprobado', presi, masDias(fAsa, -2), masDias(fAsa, 0, 19), masDias(fAsa, 0, 19),
+            aFavor, Math.max(0, asistentes - aFavor), 0,
+          ]);
+          datos.socias.slice(0, asistentes).forEach((s) => {
+            filasVotos.push([
+              idAcu, idAsa, gid, s.email, azar() < 0.85 ? 'a_favor' : 'en_contra',
+              masDias(fAsa, 0, 19), normalizeGroupRole(s.rol),
+            ]);
+          });
+          nAsambleas = 1;
+        }
 
         informe.push({
           grupo: g[GRP.nombre] || gid,
@@ -309,6 +455,9 @@ module.exports.register = function register(app, ctx) {
           aportes: nAportes,
           compras: nAcciones,
           prestamos: nPrestamos,
+          entraronALaApp: `${nQueEntraron} de ${datos.socias.length}`,
+          entradas: nEntradas,
+          asambleas: nAsambleas,
           cargosAsignados: cargosAsignados.map((c) => `${c.cargo}: ${c.email}`),
         });
       }
@@ -332,6 +481,7 @@ module.exports.register = function register(app, ctx) {
       }
       const anexar = async (rango, filas) => {
         if (!filas.length) return;
+        await asegurar(sheetsClient, rango.split('!')[0]);
         await sheetsClient.spreadsheets.values.append({
           spreadsheetId: SPREADSHEET_ID, range: rango,
           valueInputOption: 'RAW', resource: { values: filas },
@@ -341,6 +491,13 @@ module.exports.register = function register(app, ctx) {
       await anexar('Acciones!A:M', filasAcciones);
       await anexar('Loans!A:J', filasPrestamos);
       await anexar('SolicitudesPrestamos!A:J', filasSolicitudes);
+      await anexar('AprobacionesAsamblea!A:H', filasAprobaciones);
+      await anexar('LoanPayments!A:O', filasPagos);
+      await anexar('Accesos!A:H', filasAccesos);
+      await anexar('Asambleas!A:N', filasAsambleas);
+      await anexar('AsambleaAsistencia!A:F', filasAsistencia);
+      await anexar('Acuerdos!A:O', filasAcuerdos);
+      await anexar('AcuerdoVotos!A:G', filasVotos);
 
       return res.json({
         success: true,
@@ -353,6 +510,10 @@ module.exports.register = function register(app, ctx) {
           aportes: filasAhorro.length,
           compras: filasAcciones.length,
           prestamos: filasPrestamos.length,
+          pagosDeCuota: filasPagos.length,
+          entradasALaApp: filasAccesos.length,
+          asambleas: filasAsambleas.length,
+          votos: filasVotos.length,
         },
         grupos: informe,
         saltados,
@@ -380,12 +541,23 @@ module.exports.register = function register(app, ctx) {
         ['Acciones', 'Acciones!A2:M', ACC.id],
         ['Loans', 'Loans!A2:J', LOAN.id],
         ['SolicitudesPrestamos', 'SolicitudesPrestamos!A2:J', SOL.id],
+        ['AprobacionesAsamblea', 'AprobacionesAsamblea!A2:H', 0],
+        ['LoanPayments', 'LoanPayments!A2:O', 0],
+        ['Asambleas', 'Asambleas!A2:N', 0],
+        ['AsambleaAsistencia', 'AsambleaAsistencia!A2:F', 0],
+        ['Acuerdos', 'Acuerdos!A2:O', 0],
+        ['AcuerdoVotos', 'AcuerdoVotos!A2:G', 0],
+        // La hoja de accesos no tiene identificador: la marca va en Origen.
+        ['Accesos', 'Accesos!A2:H', 7],
       ]) {
         const filas = await leer(sheetsClient, rango);
         // De abajo arriba: si se borra de arriba abajo, cada borrado corre las
         // filas de debajo y el siguiente indice apunta a otra persona.
         const aBorrar = [];
-        filas.forEach((f, i) => { if (esDeDemo(f[colId])) aBorrar.push(i + 1); });
+        const esMio = nombre === 'Accesos'
+          ? (f) => (f[colId] || '').toString().trim().toLowerCase() === 'demo'
+          : (f) => esDeDemo(f[colId]);
+        filas.forEach((f, i) => { if (esMio(f)) aBorrar.push(i + 1); });
         const sheetId = idDeHoja(nombre);
         if (sheetId === null || !aBorrar.length) { borrados[nombre] = 0; continue; }
 
@@ -417,7 +589,8 @@ module.exports.register = function register(app, ctx) {
       return res.json({
         success: true,
         message: `Borrado lo sembrado: ${borrados.Savings} aportes, ${borrados.Acciones} compras, `
-               + `${borrados.Loans} prestamos y ${borrados.SolicitudesPrestamos} solicitudes. `
+               + `${borrados.Loans} prestamos, ${borrados.LoanPayments} pagos, `
+               + `${borrados.Accesos} entradas a la app y ${borrados.Asambleas} asamblea(s). `
                + 'El reglamento y los cargos se quedan como estan.',
         borrados,
       });
