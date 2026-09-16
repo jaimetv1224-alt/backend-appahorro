@@ -56,6 +56,9 @@ const SUITES = [
   ['Las hojas nuevas, editadas a mano', require('./suite-hoja-rota-nueva')],
   ['Subir el Excel de un grupo entero', require('./suite-importacion')],
   ['Datos de demostracion', require('./suite-demo')],
+  // Va la ULTIMA: monta su escenario y los accesos que deja cada inicio de
+  // sesion se escriben sin esperar; en medio ponian roja a la suite siguiente.
+  ['Correos repetidos en la hoja', require('./suite-metricas-duplicados')],
 ];
 
 (async () => {

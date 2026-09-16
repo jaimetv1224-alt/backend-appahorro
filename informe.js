@@ -163,8 +163,21 @@ module.exports.register = function register(app, ctx) {
       }
 
       // --- Personas dadas de alta ---
+      // UNA POR CORREO, no una por fila. La hoja tiene correos repetidos (dos
+      // altas de la misma persona), y contando filas cada duplicado sumaba dos
+      // veces en TODO el embudo: registradas, activaron, entradas totales y la
+      // retencion. El informe del proyecto exageraba la adopcion.
+      // Se conserva la PRIMERA fila de cada correo, que es la que resuelve el
+      // login (getUserByEmail hace find, no last).
+      const vistos = new Set();
       const personas = usuarios
         .filter((u) => normalizeEmailKey(u[USR.email]))
+        .filter((u) => {
+          const correo = normalizeEmailKey(u[USR.email]);
+          if (vistos.has(correo)) return false;
+          vistos.add(correo);
+          return true;
+        })
         .map((u) => ({
           email: normalizeEmailKey(u[USR.email]),
           nombre: (u[USR.nombre] || '').toString(),
