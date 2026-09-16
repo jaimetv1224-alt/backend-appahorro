@@ -55,6 +55,7 @@ const SUITES = [
   ['Blindaje de permisos de lo nuevo', require('./suite-blindaje')],
   ['Las hojas nuevas, editadas a mano', require('./suite-hoja-rota-nueva')],
   ['Subir el Excel de un grupo entero', require('./suite-importacion')],
+  ['Datos de demostracion', require('./suite-demo')],
 ];
 
 (async () => {
@@ -74,7 +75,8 @@ const SUITES = [
   // --- Cobertura de endpoints -------------------------------------------
   const fuente = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8')
     + fs.readFileSync(path.resolve(__dirname, '..', 'governance.js'), 'utf8')
-    + fs.readFileSync(path.resolve(__dirname, '..', 'informe.js'), 'utf8');
+    + fs.readFileSync(path.resolve(__dirname, '..', 'informe.js'), 'utf8')
+    + fs.readFileSync(path.resolve(__dirname, '..', 'demo.js'), 'utf8');
   // digitalizacion.js y metricas.js no registran rutas: son calculo puro
   const registrados = [...fuente.matchAll(/app\.(get|post|put|delete|patch)\(\s*'([^']+)'/g)]
     .map((m) => `${m[1].toUpperCase()} ${m[2]}`);
