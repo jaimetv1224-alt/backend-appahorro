@@ -291,6 +291,29 @@ module.exports = async function run() {
     Number(resu.countPrestamosAprobados || 0), todosLosCreditos);
 
   // ===================================================================
+  t.section('DEM 12. Limpiar no hace mil llamadas: borra por tramos');
+  // ===================================================================
+  // Con mil filas sembradas, borrar de una en una era una llamada a Google por
+  // fila y la limpieza no terminaba nunca. Tienen que ser unos pocos tramos.
+  preparar();
+  e = await baseScenario({ groupId: 'DMC' });
+  hoja.invalidarTodo();
+  await post('/api/admin/demo/sembrar', {}, e.tokens.admin);
+  const cuantasFilas = cuerpo('Savings').filter((f) => esDemo(f[10])).length;
+  t.check('se sembraron bastantes filas', cuantasFilas > 20, `${cuantasFilas}`);
+
+  hoja.invalidarTodo();
+  const antesLlamadas = fake.store.calls.batchUpdate;
+  r = await post('/api/admin/demo/limpiar', {}, e.tokens.admin);
+  const llamadas = fake.store.calls.batchUpdate - antesLlamadas;
+  t.status('limpiar responde', r, 200);
+  t.check('con una llamada por hoja, no una por fila',
+    llamadas <= 4, `hizo ${llamadas} llamadas para ${cuantasFilas} filas`);
+  t.eq('y no queda nada sembrado', cuerpo('Savings').filter((f) => esDemo(f[10])).length, 0);
+  t.eq('ni una solicitud suelta',
+    cuerpo('SolicitudesPrestamos').filter((f) => esDemo(f[0])).length, 0);
+
+  // ===================================================================
   t.section('DEM 8. Lo sembrado se ve en el informe del proyecto');
   // ===================================================================
   // Si el ahorro sembrado no llegara al informe, la demostracion no serviria

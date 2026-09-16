@@ -386,21 +386,31 @@ module.exports.register = function register(app, ctx) {
         // filas de debajo y el siguiente indice apunta a otra persona.
         const aBorrar = [];
         filas.forEach((f, i) => { if (esDeDemo(f[colId])) aBorrar.push(i + 1); });
-        aBorrar.reverse();
         const sheetId = idDeHoja(nombre);
         if (sheetId === null || !aBorrar.length) { borrados[nombre] = 0; continue; }
+
+        // Las filas sembradas van seguidas (se anadieron de una vez), asi que
+        // se juntan en TRAMOS. Borrar de una en una eran mas de mil llamadas a
+        // Google para una sola limpieza: no terminaba nunca.
+        const tramos = [];
         for (const idx of aBorrar) {
-          await sheetsClient.spreadsheets.batchUpdate({
-            spreadsheetId: SPREADSHEET_ID,
-            resource: {
-              requests: [{
-                deleteDimension: {
-                  range: { sheetId, dimension: 'ROWS', startIndex: idx, endIndex: idx + 1 },
-                },
-              }],
-            },
-          });
+          const ultimo = tramos[tramos.length - 1];
+          if (ultimo && idx === ultimo.fin) ultimo.fin = idx + 1;
+          else tramos.push({ ini: idx, fin: idx + 1 });
         }
+        // De abajo arriba: si se borra de arriba abajo, cada borrado corre las
+        // filas de debajo y el tramo siguiente apunta a otra gente.
+        tramos.reverse();
+        await sheetsClient.spreadsheets.batchUpdate({
+          spreadsheetId: SPREADSHEET_ID,
+          resource: {
+            requests: tramos.map((t) => ({
+              deleteDimension: {
+                range: { sheetId, dimension: 'ROWS', startIndex: t.ini, endIndex: t.fin },
+              },
+            })),
+          },
+        });
         borrados[nombre] = aBorrar.length;
       }
 
