@@ -321,6 +321,31 @@ module.exports = async function run() {
     filasDe('Users').filter((f) => (f[1] || '').startsWith('medias')).length, 8);
 
   // ===================================================================
+  t.section('IMP 12. El informe dice en que grupo cayo cada socia');
+  // ===================================================================
+  // El resolvedor acepta nombres PARECIDOS (82%). Subir la nomina de un grupo
+  // y que las 52 socias acaben en otro de nombre parecido es un error caro y
+  // silencioso; el resultado tiene que decir el nombre real del grupo.
+  preparar();
+  e = await baseScenario({ groupId: 'IMC' });
+  hoja.invalidarTodo();
+  r = await importar([
+    { Username: 'Una', Email: 'una@destino.test', Group: 'Banco Comunal Salina', GroupRole: 'member' },
+    { Username: 'Otra', Email: 'otra@destino.test', Group: 'Grupo que no existe', GroupRole: 'presidente' },
+  ], e.tokens.admin);
+
+  const dest = ((r.body && r.body.summary) || {}).grupos || [];
+  t.eq('el informe trae los dos destinos', dest.length, 2, JSON.stringify(dest));
+  const parecido = dest.find((g) => g.dice === 'Banco Comunal Salina');
+  t.check('para el nombre parecido dice el nombre REAL del grupo',
+    !!parecido && parecido.seLlama === 'Banco Comunal Salinas',
+    JSON.stringify(parecido));
+  t.eq('y cuantas socias fueron ahi', parecido && parecido.socias, 1);
+  const creado = dest.find((g) => g.dice === 'Grupo que no existe');
+  t.check('el grupo nuevo aparece con su nombre tal cual',
+    !!creado && creado.seLlama === 'Grupo que no existe', JSON.stringify(creado));
+
+  // ===================================================================
   t.section('IMP 9. Una formula del Excel no se ejecuta en la hoja');
   // ===================================================================
   preparar();

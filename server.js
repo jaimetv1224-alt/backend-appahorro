@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.16-importacion-lotes';
+const BACKEND_VERSION = '2026.09.16-importacion-destinos';
 
 let gobApi = null;
 
@@ -4194,6 +4194,11 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
     // poder vincular a nadie.
     const filasUsuarios = [];
     const filasVinculos = [];
+    // A donde fue a parar cada socia. El resolvedor de grupos acepta nombres
+    // PARECIDOS (82% de similitud), asi que subir "Mi aguinaldo" podria meter a
+    // las 52 en otro grupo de nombre parecido sin que nadie se entere. Esto lo
+    // pone en la pantalla del resultado, que es donde se puede ver a tiempo.
+    const destinos = new Map();
 
     for (let index = 0; index < rows.length; index += 1) {
         const row = rows[index] || {};
@@ -4311,7 +4316,21 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
         dentroPorGrupo.set(groupId, dentro + 1);
         filasVinculos.push([email, groupId, sanitizeCell(joinDate), groupRole, 'activo', 'self']);
         summary.linkedToGroups += 1;
+
+        if (!destinos.has(groupId)) {
+            const yaExistia = (groupsLookup && groupsLookup.names
+                .find((n) => n.groupId === groupId)) || null;
+            destinos.set(groupId, {
+                groupId,
+                dice: groupReference,
+                seLlama: yaExistia ? yaExistia.groupName : groupReference,
+                socias: 0,
+            });
+        }
+        destinos.get(groupId).socias += 1;
     }
+
+    summary.grupos = [...destinos.values()];
 
     // ---------------------------------------------------------------- PASO 3
     // Dos envios en total: uno con todas las personas y otro con todos los
