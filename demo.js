@@ -132,7 +132,13 @@ module.exports.register = function register(app, ctx) {
       });
       return r.data.values || [];
     } catch (e) {
-      if (/Unable to parse range/i.test(e && e.message)) return [];
+      // Dos formas de "aqui no hay nada": que la pestana no exista, y que se
+      // haya quedado con SOLO la cabecera. Lo segundo pasa justo despues de
+      // limpiar la demostracion, y Google lo rechaza con "exceeds grid
+      // limits" en vez de devolver vacio: sembrar fallaba con un 500 cada vez
+      // que se limpiaba antes.
+      const m = (e && e.message) || '';
+      if (/Unable to parse range|exceeds grid limits/i.test(m)) return [];
       throw e;
     }
   }

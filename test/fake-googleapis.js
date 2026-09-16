@@ -41,8 +41,8 @@ function reset() {
 }
 
 /** Hace que la proxima operacion que encaje reviente, como haria Google. */
-function fallarEn(op, patron, veces = 1) {
-  store.fallos.push({ op, patron, restantes: veces });
+function fallarEn(op, patron, veces = 1, mensaje = null) {
+  store.fallos.push({ op, patron, restantes: veces, mensaje });
 }
 
 /** Si toca fallar en esta operacion, lanza el error y consume el turno. */
@@ -52,7 +52,7 @@ function quizaFallar(op, range) {
   ));
   if (i === -1) return;
   store.fallos[i].restantes -= 1;
-  const err = new Error(`Fallo simulado en ${op} sobre ${range}`);
+  const err = new Error(store.fallos[i].mensaje || `Fallo simulado en ${op} sobre ${range}`);
   err.code = 500;
   throw err;
 }
@@ -252,6 +252,7 @@ const sheetsApi = {
     values: {
       get: async ({ range }) => {
         await latencia();
+        quizaFallar('get', range);
         store.calls.get++;
         const values = readValues(range);
         return {

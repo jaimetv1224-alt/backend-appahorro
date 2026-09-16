@@ -458,6 +458,36 @@ module.exports = async function run() {
   }
 
   // ===================================================================
+  t.section('DEM 17. Limpiar y volver a sembrar, que es lo normal');
+  // ===================================================================
+  // Fallo real en produccion: tras limpiar, la hoja se queda con SOLO la
+  // cabecera y Google rechaza leer desde la fila 2 con "exceeds grid limits"
+  // en vez de devolver vacio. Sembrar respondia 500 cada vez que se limpiaba
+  // antes, que es justo el ciclo normal de trabajo.
+  preparar();
+  e = await baseScenario({ groupId: 'DME' });
+  hoja.invalidarTodo();
+  await post('/api/admin/demo/sembrar', {}, e.tokens.admin);
+  hoja.invalidarTodo();
+  await post('/api/admin/demo/limpiar', {}, e.tokens.admin);
+  hoja.invalidarTodo();
+
+  fake.fallarEn('get', 'Loans', 1, 'Range (Loans!A2:J) exceeds grid limits. Max rows: 1, max columns: 15');
+  r = await post('/api/admin/demo/sembrar', {}, e.tokens.admin);
+  t.status('vuelve a sembrar sin caerse', r, 200);
+  t.check('y siembra de verdad', ((r.body || {}).totales || {}).aportes > 0,
+    JSON.stringify((r.body || {}).totales));
+
+  // El mismo agujero en el comprobador de movimiento de retirar-vinculo.
+  hoja.invalidarTodo();
+  const gidE = (filasDe('Groups').find((f) => f[0] === 'DME') || [])[0];
+  fake.fallarEn('get', 'Savings', 1, 'Range (Savings!A2:L) exceeds grid limits. Max rows: 1, max columns: 12');
+  const ret2 = await post('/api/admin/retirar-vinculo',
+    { Email: e.users.socio2.email, GroupID: gidE }, e.tokens.admin);
+  t.check('retirar un vinculo tampoco se cae por eso',
+    ret2.status === 200 || ret2.status === 409, `respondio ${ret2.status}`);
+
+  // ===================================================================
   t.section('DEM 8. Lo sembrado se ve en el informe del proyecto');
   // ===================================================================
   // Si el ahorro sembrado no llegara al informe, la demostracion no serviria

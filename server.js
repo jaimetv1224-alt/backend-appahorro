@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.16-demo-onboarding';
+const BACKEND_VERSION = '2026.09.16-demo-hoja-vacia';
 
 let gobApi = null;
 
@@ -4834,7 +4834,7 @@ async function movimientoEnGrupo(sheetsClient, email, groupId) {
         } catch (err) {
             // Que la pestana no exista es normal en un libro recien creado.
             // Cualquier OTRO fallo sube: ante la duda no se retira a nadie.
-            if (/Unable to parse range/i.test(err && err.message)) return 0;
+            if (/Unable to parse range|exceeds grid limits/i.test(err && err.message)) return 0;
             throw err;
         }
     };
