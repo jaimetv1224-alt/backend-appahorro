@@ -46,6 +46,13 @@ const config = {
   // incluso de otros grupos, recibian 429. Medido: seis lecturas seguidas de
   // una cuenta y la victima de otro grupo se quedo sin servicio.
   maxPorCuenta: numeroDe(process.env.SHEETS_MAX_POR_CUENTA, enPruebas() ? 100000 : 20),
+  // El administrador de la plataforma necesita MAS que una socia, y no por
+  // capricho: medido, recorrer su panel una sola vez cuesta 22 lecturas -- el
+  // tablero, los grupos, las personas, participantes, el informe y los
+  // indicadores-- contra un tope de 20. O sea que chocaba sin haber hecho nada
+  // raro, y la pantalla salia con "demasiadas consultas". Es UNA sola cuenta y
+  // solo lee, asi que su tope es mas alto; el de las socias no se toca.
+  maxPorAdmin: numeroDe(process.env.SHEETS_MAX_POR_ADMIN, enPruebas() ? 100000 : 40),
   // Lo maximo que una peticion espera su turno antes de rendirse
   esperaMaxMs: numeroDe(process.env.SHEETS_ESPERA_MAX_MS, 15000),
   // Reintentos cuando Google responde 429 pese al freno
@@ -104,7 +111,11 @@ function invalidarTodo() {
  * dejar que una sola se la lleve toda.
  */
 let cuentaActual = '';
-const enNombreDe = (cuenta) => { cuentaActual = (cuenta || '').toString().toLowerCase(); };
+let cuentaEsAdmin = false;
+const enNombreDe = (cuenta, esAdmin) => {
+  cuentaActual = (cuenta || '').toString().toLowerCase();
+  cuentaEsAdmin = esAdmin === true;
+};
 
 /** Limpia y devuelve la ventana del minuto de una cuenta. */
 function ventanaDe(cuenta, ahora) {
@@ -120,13 +131,14 @@ async function pedirTurno() {
   if (!(config.maxPorMinuto > 0)) return;
   const inicio = Date.now();
   const cuenta = cuentaActual;
+  const suTope = cuentaEsAdmin ? config.maxPorAdmin : config.maxPorCuenta;
   for (;;) {
     const ahora = Date.now();
     while (ventana.length > 0 && ahora - ventana[0] >= 60000) ventana.shift();
 
     // El tope de la persona va PRIMERO: si se pasa, espera ella, no las demas.
-    const suya = cuenta && config.maxPorCuenta > 0 ? ventanaDe(cuenta, ahora) : null;
-    const sePasoElla = suya && suya.length >= config.maxPorCuenta;
+    const suya = cuenta && suTope > 0 ? ventanaDe(cuenta, ahora) : null;
+    const sePasoElla = suya && suya.length >= suTope;
 
     if (!sePasoElla && ventana.length < config.maxPorMinuto) {
       ventana.push(ahora);
@@ -263,11 +275,63 @@ function envolver(cliente) {
     }
   }
 
-  // batchGet tambien es lectura, pero no se cachea: sus rangos varian mucho y
-  // el freno ya evita lo importante.
+  // batchGet TAMBIEN se cachea, con la misma politica de 12 s que `get`.
+  //
+  // Antes no: el comentario decia que "sus rangos varian mucho". Medido, es al
+  // reves -- las pantallas pesadas piden SIEMPRE la misma lista: el informe del
+  // proyecto y los indicadores comparten los mismos 16 rangos, obtener-grupos
+  // repite tres y participantes cuatro. Sin cachear, abrir el panel de
+  // administracion costaba 22 unidades de cuota contra un tope de 20 por
+  // cuenta, y salia "la hoja esta recibiendo demasiadas consultas" sin que
+  // nadie hubiera hecho nada raro.
+  //
+  // La seguridad es la misma que en `get`: cualquier escritura invalida todo
+  // (`invalidar`), una lectura que viajaba durante una escritura no se guarda,
+  // y `__sinCache` sigue saltandose la memoria para quien va a escribir sobre
+  // lo que lee.
   if (typeof values.batchGet === 'function') {
     valuesEnvueltos.batchGet = async function batchGet(params, ...resto) {
-      return conFreno(() => values.batchGet.call(values, params, ...resto));
+      const p = params || {};
+      const sinCache = !!p.__sinCache;
+      const limpio = { ...p };
+      delete limpio.__sinCache;
+      const clave = [
+        'batch',
+        p.spreadsheetId || '',
+        (p.ranges || []).join('|'),
+        p.majorDimension || '',
+        p.valueRenderOption || '',
+      ].join('::');
+      const ahora = Date.now();
+
+      if (config.ttlMs > 0 && !sinCache) {
+        const guardado = memoria.get(clave);
+        if (guardado && guardado.expira > ahora) {
+          stats.aciertos += 1;
+          return guardado.valor;
+        }
+        const yendo = enVuelo.get(clave);
+        if (yendo && yendo.epoca === epoca) {
+          stats.compartidas += 1;
+          return yendo.promesa;
+        }
+      }
+
+      const miEpoca = epoca;
+      const promesa = conFreno(() => values.batchGet.call(values, limpio, ...resto))
+        .then((r) => {
+          if (config.ttlMs > 0 && !sinCache && miEpoca === epoca) {
+            memoria.set(clave, { valor: r, expira: Date.now() + config.ttlMs });
+          }
+          return r;
+        })
+        .finally(() => {
+          const yendo = enVuelo.get(clave);
+          if (yendo && yendo.promesa === promesa) enVuelo.delete(clave);
+        });
+
+      if (config.ttlMs > 0 && !sinCache) enVuelo.set(clave, { promesa, epoca: miEpoca });
+      return promesa;
     };
   }
 

@@ -15,7 +15,7 @@
 
 const BASE = (process.argv[2] || 'https://backend-appahorro.onrender.com').replace(/\/+$/, '');
 const ORIGEN_WEB = (process.argv[3] || 'https://juntago.com').replace(/\/+$/, '');
-const VERSION_ESPERADA = '2026.09.15-informe';
+const VERSION_ESPERADA = '2026.09.16-cuota';
 
 const V = '\x1b[32m';
 const R = '\x1b[31m';

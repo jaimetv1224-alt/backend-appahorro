@@ -125,8 +125,11 @@ async function requireAuth(req, res, next) {
   const email = payload.email.toString().trim().toLowerCase();
   req.user = { email, role: (payload.role || 'member') };
   // El freno de lecturas reparte la cuota POR PERSONA: sin esto, una sola
-  // cuenta recargando pantallas pesadas dejaba sin servicio a las demas.
-  hojaEnNombreDe(email);
+  // cuenta recargando pantallas pesadas dejaba sin servicio a las demas. El
+  // administrador de la plataforma va con su propio tope, mas alto: sus
+  // pantallas agregan todo y con el de una socia no le alcanzaba ni para dar
+  // una vuelta al panel.
+  hojaEnNombreDe(email, req.user.role === 'admin');
 
   // Si no se puede comprobar (la hoja no responde) se sigue con lo que dice el
   // token: dejar a todo el mundo fuera por un fallo de lectura seria peor.
@@ -297,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.15-informe';
+const BACKEND_VERSION = '2026.09.16-cuota';
 
 let gobApi = null;
 
