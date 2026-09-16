@@ -37,6 +37,9 @@ const LINK = { email: 0, group: 1, alta: 2, rol: 3, estado: 4 };
 const SAV = { email: 0, group: 1, monto: 2, fecha: 3, desc: 5, estado: 6, id: 10 };
 const ACC = { email: 0, group: 1, fecha: 2, cantidad: 3, valor: 4, estado: 7, id: 11, nota: 12 };
 const LOAN = { id: 0, email: 1, group: 2, monto: 3, inicio: 4, vence: 5, tasa: 6, estado: 7 };
+// SolicitudesPrestamos: ID, UserEmail, Group, GroupRole, Monto, Estado, Fecha,
+// Detalles, AprobadoPor, TasaInteres. El ID es el MISMO que el del prestamo.
+const SOL = { id: 0, email: 1, group: 2, monto: 4, estado: 5, fecha: 6 };
 
 const letraDeColumna = (n) => {
   let s = '';
@@ -149,6 +152,10 @@ module.exports.register = function register(app, ctx) {
       const filasAhorro = [];
       const filasAcciones = [];
       const filasPrestamos = [];
+      // Un prestamo de verdad NACE de una solicitud aprobada, y el panel cuenta
+      // los prestamos leyendo esa hoja, no Loans. Sembrar solo el prestamo
+      // dejaba el tablero marcando $0 con 27 creditos vivos.
+      const filasSolicitudes = [];
       const cambiosGrupo = [];
       const cambiosRol = [];
       const informe = [];
@@ -281,9 +288,16 @@ module.exports.register = function register(app, ctx) {
           const total = Math.round(principal * (1 + (interesMensual / 100) * plazo) * 100) / 100;
           const { a, m } = meses[Math.min(meses.length - 1, 1 + Math.floor(azar() * Math.max(1, meses.length - 2)))];
           const vence = new Date(Date.UTC(a, (m - 1) + plazo, 10)).toISOString().slice(0, 10);
+          const idPrestamo = `${PREFIJO}loan_${gid.slice(0, 6)}_${idx}`;
+          const fechaPrestamo = `${a}-${dosDigitos(m)}-10`;
           filasPrestamos.push([
-            `${PREFIJO}loan_${gid.slice(0, 6)}_${idx}`, s.email, gid, principal,
-            `${a}-${dosDigitos(m)}-10`, vence, interesMensual, 'aprobado', plazo, total,
+            idPrestamo, s.email, gid, principal,
+            fechaPrestamo, vence, interesMensual, 'aprobado', plazo, total,
+          ]);
+          filasSolicitudes.push([
+            idPrestamo, s.email, gid, 'member', principal, 'aprobado', fechaPrestamo,
+            `Prestamo a ${plazo} meses ${MARCA}`,
+            datos.cargos.get('presidente') || s.email, interesMensual,
           ]);
           nPrestamos += 1;
         });
@@ -326,11 +340,12 @@ module.exports.register = function register(app, ctx) {
       await anexar('Savings!A:L', filasAhorro);
       await anexar('Acciones!A:M', filasAcciones);
       await anexar('Loans!A:J', filasPrestamos);
+      await anexar('SolicitudesPrestamos!A:J', filasSolicitudes);
 
       return res.json({
         success: true,
         message: `Sembrados ${filasAhorro.length} aportes, ${filasAcciones.length} compras de acciones `
-               + `y ${filasPrestamos.length} prestamos en ${informe.length} grupo(s). `
+               + `y ${filasPrestamos.length} prestamos (con su solicitud aprobada) en ${informe.length} grupo(s). `
                + 'Todo va marcado como demostracion y se borra con /api/admin/demo/limpiar.',
         marca: MARCA,
         totales: {
@@ -364,6 +379,7 @@ module.exports.register = function register(app, ctx) {
         ['Savings', 'Savings!A2:L', SAV.id],
         ['Acciones', 'Acciones!A2:M', ACC.id],
         ['Loans', 'Loans!A2:J', LOAN.id],
+        ['SolicitudesPrestamos', 'SolicitudesPrestamos!A2:J', SOL.id],
       ]) {
         const filas = await leer(sheetsClient, rango);
         // De abajo arriba: si se borra de arriba abajo, cada borrado corre las
@@ -390,8 +406,9 @@ module.exports.register = function register(app, ctx) {
 
       return res.json({
         success: true,
-        message: `Borrado lo sembrado: ${borrados.Savings} aportes, ${borrados.Acciones} compras `
-               + `y ${borrados.Loans} prestamos. El reglamento y los cargos se quedan como estan.`,
+        message: `Borrado lo sembrado: ${borrados.Savings} aportes, ${borrados.Acciones} compras, `
+               + `${borrados.Loans} prestamos y ${borrados.SolicitudesPrestamos} solicitudes. `
+               + 'El reglamento y los cargos se quedan como estan.',
         borrados,
       });
     } catch (error) {

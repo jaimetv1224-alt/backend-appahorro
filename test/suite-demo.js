@@ -14,7 +14,7 @@
  *   - y esto es del administrador de la plataforma, de nadie mas.
  */
 
-const { seedWorkbook, post, fake } = require('./harness');
+const { seedWorkbook, get, post, fake } = require('./harness');
 const { baseScenario, seedUser, seedGroup, seedLink } = require('./scenario');
 const t = require('./runner');
 
@@ -258,6 +258,39 @@ module.exports = async function run() {
     cuerpo('Acciones').filter((f) => f[1] === 'DMAC' && f[11] === 'acc_real_1').length, 1);
 
   // ===================================================================
+  t.section('DEM 11. El prestamo nace de su solicitud, y el panel lo ve');
+  // ===================================================================
+  // El tablero cuenta los prestamos leyendo SolicitudesPrestamos, no Loans.
+  // Sembrar solo el prestamo lo dejaba marcando $0 con creditos vivos, que es
+  // justo la cifra que se le ensena a la directiva.
+  preparar();
+  e = await baseScenario({ groupId: 'DMB' });
+  hoja.invalidarTodo();
+  await post('/api/admin/demo/sembrar', {}, e.tokens.admin);
+
+  const creditosB = cuerpo('Loans').filter((f) => f[2] === 'DMB');
+  const solicitudesB = cuerpo('SolicitudesPrestamos').filter((f) => f[2] === 'DMB');
+  t.check('hay prestamos', creditosB.length > 0, '');
+  t.eq('cada prestamo tiene su solicitud', solicitudesB.length, creditosB.length);
+  t.check('con el MISMO identificador, que es como se enlazan',
+    creditosB.every((c) => solicitudesB.some((x) => x[0] === c[0])),
+    JSON.stringify({ prestamos: creditosB.map((c) => c[0]), solicitudes: solicitudesB.map((x) => x[0]) }));
+  t.check('y todas aprobadas', solicitudesB.every((x) => x[5] === 'aprobado'), '');
+  t.check('por el mismo importe',
+    creditosB.every((c) => solicitudesB.some((x) => x[0] === c[0] && Number(x[4]) === Number(c[3]))), '');
+
+  hoja.invalidarTodo();
+  const panel = await get('/api/admin/resumen', e.tokens.admin);
+  t.status('el panel responde', panel, 200);
+  const resu = (panel.body || {}).resumen || {};
+  t.check('y el panel ya ve dinero prestado',
+    Number(resu.prestamosAprobados || 0) > 0, JSON.stringify(resu.prestamosAprobados));
+  // El panel es de TODA la plataforma, no de un grupo: se compara contra la hoja entera.
+  const todosLosCreditos = cuerpo('Loans').length;
+  t.eq('y cuenta exactamente los creditos que hay en la hoja',
+    Number(resu.countPrestamosAprobados || 0), todosLosCreditos);
+
+  // ===================================================================
   t.section('DEM 8. Lo sembrado se ve en el informe del proyecto');
   // ===================================================================
   // Si el ahorro sembrado no llegara al informe, la demostracion no serviria
@@ -268,7 +301,6 @@ module.exports = async function run() {
   await post('/api/admin/demo/sembrar', {}, e.tokens.admin);
   hoja.invalidarTodo();
 
-  const { get } = require('./harness');
   const inf = await get('/api/admin/informe-proyecto', e.tokens.admin);
   t.status('el informe responde', inf, 200);
   const filaGrupo = (((inf.body || {}).hojas || [])
