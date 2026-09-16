@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.16-cuota';
+const BACKEND_VERSION = '2026.09.16-importacion-lotes';
 
 let gobApi = null;
 
@@ -4031,11 +4031,18 @@ const buildGroupsLookup = async () => {
     const byId = new Map();
     const byName = new Map();
     const names = [];
+    // El tope de socias (columna M) sale de ESTA misma lectura. Antes se volvia
+    // a leer la hoja Groups entera una vez por cada fila del Excel solo para
+    // mirar ese numero.
+    const topes = new Map();
 
     (rows || []).forEach((row) => {
         const groupId = normalizeImportCell(row?.[0]);
         const groupName = normalizeImportCell(row?.[1]);
-        if (groupId) byId.set(normalizeImportLookupKey(groupId), groupId);
+        if (groupId) {
+            byId.set(normalizeImportLookupKey(groupId), groupId);
+            topes.set(normalizeGroupKey(groupId), Math.max(0, Math.trunc(parseMoney(row?.[12])) || 0));
+        }
         if (groupName) {
             const normalizedName = normalizeImportLookupKey(groupName);
             byName.set(normalizedName, groupId);
@@ -4043,7 +4050,7 @@ const buildGroupsLookup = async () => {
         }
     });
 
-    return { byId, byName, names };
+    return { byId, byName, names, topes };
 };
 
 const levenshteinDistance = (a, b) => {
@@ -4118,6 +4125,26 @@ const cleanupUploadedFile = async (filePath) => {
     }
 };
 
+/**
+ * Da de alta a las socias de un Excel y las mete en su grupo.
+ *
+ * ANTES iba fila por fila, y cada fila costaba unas ocho operaciones contra
+ * Google: releer la hoja Users entera para ver si la persona ya estaba, releer
+ * UserGroupLinks entera para ver si el vinculo existia, releer Groups entera
+ * para mirar el tope, y cuatro escrituras que ademas borraban la memoria del
+ * servidor, con lo que la fila siguiente no podia reaprovechar nada. Con las
+ * 52 socias de un grupo salian mas de 260 lecturas contra un limite de 40 por
+ * minuto: cinco minutos de espera y, al final, un error de cuota que se
+ * mostraba como un 500 pelado y no dejaba nada cargado.
+ *
+ * AHORA son tres pasos: se lee una vez lo que hace falta, se arma todo en
+ * memoria, y se escribe en dos envios. El coste ya no depende de cuanta gente
+ * traiga el archivo.
+ *
+ * Las personas se escriben ANTES que los vinculos a proposito: si fallara el
+ * segundo envio, quedan creadas y volver a subir el mismo archivo completa solo
+ * lo que falta, sin duplicar a nadie.
+ */
 const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
     const summary = {
         processed: rows.length,
@@ -4131,6 +4158,8 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
         errors: [],
     };
 
+    // ---------------------------------------------------------------- PASO 1
+    // Todo lo que hay que saber de la hoja, leido UNA vez.
     const existingRows = await usersService.listAllUsers();
     const knownEmails = new Set(
         (existingRows || [])
@@ -4138,6 +4167,33 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
             .filter(Boolean)
     );
     const groupsLookup = linkGroups ? await buildGroupsLookup() : null;
+
+    // Vinculos ya escritos. El mismo recorrido sirve para dos cosas: no repetir
+    // a nadie en su grupo y saber cuantas socias hay dentro para respetar el
+    // tope. Un vinculo dado de baja SIGUE contando como duplicado (es lo que ya
+    // hacia el alta de una en una) pero no ocupa cupo.
+    const vinculos = new Set();
+    const dentroPorGrupo = new Map();
+    if (linkGroups) {
+        const sheetsClient = await getSheetsClient();
+        const enlacesResp = await sheetsClient.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: 'UserGroupLinks!A2:F',
+        });
+        (enlacesResp.data.values || []).forEach((fila) => {
+            const gid = normalizeGroupKey(fila[1]);
+            if (!gid) return;
+            vinculos.add(`${normalize(fila[0])}|${gid}`);
+            if (linkIsActive(fila)) dentroPorGrupo.set(gid, (dentroPorGrupo.get(gid) || 0) + 1);
+        });
+    }
+
+    // ---------------------------------------------------------------- PASO 2
+    // Se arma todo en memoria. Aqui no se escribe nada, salvo los grupos que
+    // haya que crear: son unos pocos y hace falta su identificador antes de
+    // poder vincular a nadie.
+    const filasUsuarios = [];
+    const filasVinculos = [];
 
     for (let index = 0; index < rows.length; index += 1) {
         const row = rows[index] || {};
@@ -4156,32 +4212,27 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
             continue;
         }
 
-        try {
-            if (knownEmails.has(email)) {
-                summary.existingUsers += 1;
-            } else {
+        if (knownEmails.has(email)) {
+            summary.existingUsers += 1;
+        } else {
+            try {
                 if (!password && !importedHash) {
                     password = DEFAULT_IMPORT_PASSWORD;
                     summary.defaultedPasswords += 1;
                 }
 
-                await usersService.createUser({
+                filasUsuarios.push(await usersService.prepararFilaUsuario({
                     Username: username,
                     Email: email,
                     Password: password,
                     HashedPassword: importedHash,
                     Role: role,
                     Balance: balance,
-                });
+                }));
 
                 knownEmails.add(email);
                 summary.createdUsers += 1;
-            }
-        } catch (error) {
-            if (error?.code === 'USER_EXISTS') {
-                knownEmails.add(email);
-                summary.existingUsers += 1;
-            } else {
+            } catch (error) {
                 summary.failed += 1;
                 summary.errors.push(`Fila ${rowNumber}: error al crear usuario ${email} (${error.message}).`);
                 continue;
@@ -4213,6 +4264,8 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
                         groupId: createdGroupId,
                         groupName: groupReference,
                     });
+                    // Un grupo recien creado no trae tope: entra toda la lista.
+                    groupsLookup.topes.set(normalizeGroupKey(createdGroupId), 0);
                     resolvedGroupId = createdGroupId;
                     summary.createdGroups += 1;
                 }
@@ -4229,36 +4282,67 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
             continue;
         }
 
-        const groupId = resolvedGroupId || groupReference;
+        const groupId = normalizeGroupKey(resolvedGroupId || groupReference);
         const groupRole = normalizeGroupRole(pickFirstValue(row, ['GroupRole', 'groupRole', 'RolGrupo', 'rolGrupo', 'Rol Grupo', 'Rol']));
         const joinDate = normalizeImportCell(pickFirstValue(row, ['JoinDate', 'joinDate', 'FechaIngreso', 'fechaIngreso'])) || new Date().toISOString();
 
-        let linkResult;
-        try {
-            linkResult = await createUserGroupLink({
-                UserEmail: email,
-                GroupID: groupId,
-                GroupRole: groupRole || 'member',
-                JoinDate: joinDate,
-            });
-        } catch (error) {
-            summary.failed += 1;
-            summary.errors.push(`Fila ${rowNumber}: error al vincular ${email} al grupo ${groupId} (${error.message}).`);
-            continue;
-        }
-
-        if (linkResult.ok) {
-            summary.linkedToGroups += 1;
-            continue;
-        }
-
-        if (linkResult.status === 409) {
+        const clave = `${email}|${groupId}`;
+        if (vinculos.has(clave)) {
             summary.existingLinks += 1;
             continue;
         }
 
-        summary.failed += 1;
-        summary.errors.push(`Fila ${rowNumber}: no se pudo vincular ${email} al grupo ${groupId}.`);
+        // El tope que el grupo se puso a si mismo. Cuenta lo que ya estaba
+        // dentro MAS lo que lleva pendiente este mismo archivo: si no, un Excel
+        // con mas gente que el tope entraria entero.
+        const tope = (groupsLookup && groupsLookup.topes.get(groupId)) || 0;
+        const dentro = dentroPorGrupo.get(groupId) || 0;
+        if (tope > 0 && dentro >= tope) {
+            summary.failed += 1;
+            summary.errors.push(
+                `Fila ${rowNumber}: el grupo tiene un tope de ${tope} socias y ya son ${dentro}, `
+                + `así que ${email} se queda fuera. Para que entre, la directiva tiene que subir `
+                + 'el tope en la configuración del grupo.'
+            );
+            continue;
+        }
+
+        vinculos.add(clave);
+        dentroPorGrupo.set(groupId, dentro + 1);
+        filasVinculos.push([email, groupId, sanitizeCell(joinDate), groupRole, 'activo', 'self']);
+        summary.linkedToGroups += 1;
+    }
+
+    // ---------------------------------------------------------------- PASO 3
+    // Dos envios en total: uno con todas las personas y otro con todos los
+    // vinculos.
+    if (filasUsuarios.length) {
+        await usersService.crearUsuariosEnLote(filasUsuarios);
+    }
+
+    if (filasVinculos.length) {
+        try {
+            const sheetsClient = await getSheetsClient();
+            await sheetsClient.spreadsheets.values.append({
+                spreadsheetId: SPREADSHEET_ID,
+                range: 'UserGroupLinks!A:F',
+                valueInputOption: 'USER_ENTERED',
+                resource: { values: filasVinculos },
+            });
+        } catch (error) {
+            // Aqui NO se lanza el error: las personas ya quedaron creadas y, si
+            // se lanzara, la pantalla perderia el detalle fila por fila y el
+            // administrador no sabria que paso ni que hacer. Se devuelve el
+            // informe con la verdad: quienes entraron, quienes no, y el remedio.
+            summary.failed += filasVinculos.length;
+            summary.linkedToGroups = 0;
+            summary.vinculosPendientes = filasVinculos.length;
+            summary.errors.push(
+                `Se crearon ${summary.createdUsers} personas, pero no se pudieron guardar sus `
+                + `${filasVinculos.length} vínculos de grupo (${error.message}). Vuelve a subir `
+                + 'el mismo archivo: no se duplicará a nadie y completará solo lo que falta.'
+            );
+        }
     }
 
     return summary;
@@ -4272,7 +4356,11 @@ const buildImportMessage = (summary, modeLabel) => (
     + `claves por defecto: ${summary.defaultedPasswords || 0}, errores: ${summary.failed}.`
 );
 
-app.post('/api/importar-usuarios-excel', requireAdmin, upload.single('file'), async (req, res) => {
+// El cerrojo NO es decorativo: la importacion lee la foto de la hoja, arma
+// todas las filas y las escribe de una vez. Dos peticiones a la vez (un doble
+// clic en el boton basta) leerian la MISMA foto y escribirian las mismas 52
+// socias dos veces, porque Google Sheets no impide correos repetidos.
+app.post('/api/importar-usuarios-excel', requireAdmin, bloquear(() => 'hoja:Users'), upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ message: 'No se subio ningun archivo.' });
@@ -4293,14 +4381,26 @@ app.post('/api/importar-usuarios-excel', requireAdmin, upload.single('file'), as
         }
         return res.json({ success: summary.failed === 0, message, summary });
     } catch (error) {
-        return res.status(500).json({ message: 'Error al importar usuarios desde Excel.', error: error.message });
+        // Un fallo de cuota de Google es un 429 con un remedio claro, no un
+        // 500 anonimo: la pantalla decia "Error interno" y no se sabia si
+        // habia que reintentar, partir el archivo o llamar a alguien.
+        if (responderSiEsCuota(res, error)) return;
+        return res.status(500).json({
+            success: false,
+            message: error.message || 'Error al importar usuarios desde Excel.',
+            error: error.message,
+        });
     } finally {
         await cleanupUploadedFile(req.file?.path);
     }
 });
 
 // Endpoint para importar usuarios y grupos desde Excel
-app.post('/api/importar-usuarios-grupos', requireAdmin, upload.single('file'), async (req, res) => {
+// El cerrojo NO es decorativo: la importacion lee la foto de la hoja, arma
+// todas las filas y las escribe de una vez. Dos peticiones a la vez (un doble
+// clic en el boton basta) leerian la MISMA foto y escribirian las mismas 52
+// socias dos veces, porque Google Sheets no impide correos repetidos.
+app.post('/api/importar-usuarios-grupos', requireAdmin, bloquear(() => 'hoja:Users'), upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ message: 'No se subio ningun archivo.' });
@@ -4321,7 +4421,15 @@ app.post('/api/importar-usuarios-grupos', requireAdmin, upload.single('file'), a
         }
         return res.json({ success: summary.failed === 0, message, summary });
     } catch (error) {
-        return res.status(500).json({ message: 'Error al importar usuarios y grupos.', error: error.message });
+        // Un fallo de cuota de Google es un 429 con un remedio claro, no un
+        // 500 anonimo: la pantalla decia "Error interno" y no se sabia si
+        // habia que reintentar, partir el archivo o llamar a alguien.
+        if (responderSiEsCuota(res, error)) return;
+        return res.status(500).json({
+            success: false,
+            message: error.message || 'Error al importar usuarios y grupos.',
+            error: error.message,
+        });
     } finally {
         await cleanupUploadedFile(req.file?.path);
     }

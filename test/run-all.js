@@ -54,6 +54,7 @@ const SUITES = [
   ['Un anio entero del grupo, con todo a la vez', require('./suite-anio-completo')],
   ['Blindaje de permisos de lo nuevo', require('./suite-blindaje')],
   ['Las hojas nuevas, editadas a mano', require('./suite-hoja-rota-nueva')],
+  ['Subir el Excel de un grupo entero', require('./suite-importacion')],
 ];
 
 (async () => {

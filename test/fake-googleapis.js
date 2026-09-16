@@ -19,6 +19,10 @@ const store = {
   // instantaneamente y las carreras lectura-escritura no llegan a producirse;
   // subiendola se reproducen las condiciones reales de red contra Google.
   latencyMs: 0,
+  // Fallos a proposito: [{ op, patron, restantes }]. Sirven para probar que
+  // pasa cuando Google acepta una escritura y rechaza la siguiente, que es
+  // justo el caso en que la importacion puede dejar el trabajo a medias.
+  fallos: [],
 };
 
 /** Espera la latencia simulada (si la hay) antes de responder. */
@@ -33,6 +37,24 @@ function reset() {
   store.calls = { get: 0, update: 0, append: 0, batchGet: 0, batchUpdate: 0, clear: 0 };
   store.localeDecimalComma = false;
   store.latencyMs = 0;
+  store.fallos = [];
+}
+
+/** Hace que la proxima operacion que encaje reviente, como haria Google. */
+function fallarEn(op, patron, veces = 1) {
+  store.fallos.push({ op, patron, restantes: veces });
+}
+
+/** Si toca fallar en esta operacion, lanza el error y consume el turno. */
+function quizaFallar(op, range) {
+  const i = store.fallos.findIndex((f) => (
+    f.restantes > 0 && f.op === op && (!f.patron || new RegExp(f.patron).test(range || ''))
+  ));
+  if (i === -1) return;
+  store.fallos[i].restantes -= 1;
+  const err = new Error(`Fallo simulado en ${op} sobre ${range}`);
+  err.code = 500;
+  throw err;
 }
 
 function ensureSheet(title) {
@@ -254,6 +276,7 @@ const sheetsApi = {
 
       update: async (params) => {
         await latencia();
+        quizaFallar('update', params.range);
         store.calls.update++;
         const body = params.requestBody || params.resource || {};
         const r = writeValues(params.range, body.values);
@@ -262,6 +285,7 @@ const sheetsApi = {
 
       append: async (params) => {
         await latencia();
+        quizaFallar('append', params.range);
         store.calls.append++;
         const body = params.requestBody || params.resource || {};
         const r = writeValues(params.range, body.values, { append: true });
@@ -294,5 +318,5 @@ const google = {
 
 module.exports = {
   google,
-  __fake: { store, reset, seedSheet, dumpSheet, ensureSheet, parseRange, readValues },
+  __fake: { store, reset, seedSheet, dumpSheet, ensureSheet, parseRange, readValues, fallarEn },
 };

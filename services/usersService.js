@@ -98,9 +98,14 @@ async function getUserByEmail(email) {
   return all.find((row) => normalizeEmail(row?.[1]) === targetEmail) || null;
 }
 
-async function createUser(user) {
-  await ensureUsersHeader();
-
+/**
+ * Comprueba y normaliza los datos de una persona SIN tocar la hoja.
+ *
+ * Esta parte estaba metida dentro de createUser, y por eso dar de alta a 52
+ * socias costaba 52 lecturas de la hoja entera: no habia forma de preparar las
+ * filas primero y escribirlas todas juntas despues.
+ */
+function normalizarUsuario(user) {
   const username = (user?.Username || '').toString().trim();
   const email = normalizeEmail(user?.Email);
   const password = (user?.Password || '').toString();
@@ -114,35 +119,97 @@ async function createUser(user) {
     throw new Error('Faltan datos obligatorios');
   }
 
-  const existing = await getUserByEmail(email);
+  return {
+    username,
+    email,
+    password,
+    importedHash,
+    role,
+    balance,
+    hasPassword,
+    hasImportedHash,
+    telefono: (user?.Telefono || '').toString().trim(),
+    cedula: (user?.Cedula || '').toString().trim(),
+    estado: (user?.Estado || 'activo').toString().trim().toLowerCase(),
+  };
+}
+
+/**
+ * Las nueve celdas de la fila de Users, ya con la clave cifrada.
+ *
+ * El cifrado va por la version asincrona a proposito: bcrypt.hashSync con 52
+ * personas seguidas deja el servidor congelado varios segundos y nadie mas
+ * puede entrar mientras tanto.
+ */
+async function filaDeUsuario(norm) {
+  let hashedPassword = '';
+  if (norm.hasImportedHash && isLikelyBcryptHash(norm.importedHash)) {
+    hashedPassword = norm.importedHash;
+  } else if (norm.hasPassword) {
+    hashedPassword = await bcrypt.hash(norm.password, 10);
+  } else {
+    throw new Error('La contraseña importada no tiene un formato válido.');
+  }
+
+  return [
+    norm.username,
+    norm.email,
+    hashedPassword,
+    norm.role,
+    norm.balance,
+    new Date().toISOString(),
+    norm.telefono,
+    norm.cedula,
+    norm.estado,
+  ];
+}
+
+/** Prepara la fila de una persona sin escribir nada. Para altas en lote. */
+async function prepararFilaUsuario(user) {
+  return filaDeUsuario(normalizarUsuario(user));
+}
+
+/**
+ * Escribe MUCHAS personas de una sola vez: un append y un registro de
+ * auditoria, en lugar de dos por cabeza.
+ */
+async function crearUsuariosEnLote(filas) {
+  const lote = (filas || []).filter((f) => Array.isArray(f) && f.length);
+  if (!lote.length) return 0;
+
+  await ensureUsersHeader();
+  const sheets = await getSheetsClient();
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Users!A2:I2',
+    valueInputOption: 'RAW',
+    resource: { values: lote },
+  });
+
+  const auditLogService = require('./auditLogService');
+  await auditLogService.log({
+    UserEmail: lote[0][1],
+    Action: `create_lote_${lote.length}`,
+    Target: 'Users',
+    Date: new Date().toISOString(),
+  });
+
+  return lote.length;
+}
+
+async function createUser(user) {
+  await ensureUsersHeader();
+
+  const norm = normalizarUsuario(user);
+
+  const existing = await getUserByEmail(norm.email);
   if (existing) {
     const err = new Error('El usuario ya existe');
     err.code = 'USER_EXISTS';
     throw err;
   }
 
-  let hashedPassword = '';
-  if (hasImportedHash && isLikelyBcryptHash(importedHash)) {
-    hashedPassword = importedHash;
-  } else if (hasPassword) {
-    hashedPassword = bcrypt.hashSync(password, 10);
-  } else {
-    throw new Error('La contraseña importada no tiene un formato válido.');
-  }
-  const telefono = (user?.Telefono || '').toString().trim();
-  const cedula = (user?.Cedula || '').toString().trim();
-  const estado = (user?.Estado || 'activo').toString().trim().toLowerCase();
-  const row = [
-    username,
-    email,
-    hashedPassword,
-    role,
-    balance,
-    new Date().toISOString(),
-    telefono,
-    cedula,
-    estado,
-  ];
+  const row = await filaDeUsuario(norm);
 
   const sheets = await getSheetsClient();
   await sheets.spreadsheets.values.append({
@@ -154,7 +221,7 @@ async function createUser(user) {
 
   const auditLogService = require('./auditLogService');
   await auditLogService.log({
-    UserEmail: email,
+    UserEmail: norm.email,
     Action: 'create',
     Target: 'Users',
     Date: new Date().toISOString(),
@@ -167,4 +234,6 @@ module.exports = {
   listAllUsers,
   getUserByEmail,
   createUser,
+  prepararFilaUsuario,
+  crearUsuariosEnLote,
 };

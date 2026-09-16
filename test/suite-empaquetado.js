@@ -117,8 +117,16 @@ module.exports = async function run() {
     /url\.pathname\.startsWith\('\/api\/'\)[\s\S]{0,40}return;/.test(sw), '');
   t.check('solo se mete con su propia direccion',
     sw.includes('url.origin !== self.location.origin'), '');
+  // Se mide el ORDEN, no una cadena exacta: la llamada lleva ahora opciones
+  // (`cache: 'no-store'`) y buscar el texto literal hacia fallar una prueba que
+  // en realidad seguia cumpliendose.
   t.check('la navegacion va primero a la red',
-    sw.indexOf('await fetch(peticion)') < sw.indexOf("caches.match('/index.html')"), '');
+    sw.indexOf('await fetch(peticion') < sw.indexOf("caches.match('/index.html')"), '');
+  // Y sin la cache del navegador por medio: en Hostinger mod_headers esta
+  // desactivado, asi que index.html llega sin Cache-Control y sin esto el
+  // navegador sirve una cascara vieja que apunta a archivos ya borrados.
+  t.check('y sin pasar por la cache del navegador',
+    /fetch\(peticion, \{ cache: 'no-store' \}\)/.test(sw), '');
   t.check('borra las versiones viejas al activarse',
     sw.includes('caches.delete'), '');
 
