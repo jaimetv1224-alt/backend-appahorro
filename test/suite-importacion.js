@@ -20,7 +20,7 @@
  */
 
 const xlsx = require('xlsx');
-const { seedWorkbook, get, postArchivo, fake } = require('./harness');
+const { seedWorkbook, get, post, postArchivo, fake } = require('./harness');
 const { baseScenario, seedUser, seedGroup, seedLink, login } = require('./scenario');
 const t = require('./runner');
 
@@ -467,6 +467,122 @@ module.exports = async function run() {
   t.check('ninguna con la marca de acentos rotos',
     !conAcento.some((f) => (f[0] || '').indexOf(MARCA) !== -1),
     JSON.stringify(conAcento.map((f) => f[0])));
+
+  // ===================================================================
+  t.section('IMP 17. Un nombre parecido NO se traga a otro grupo');
+  // ===================================================================
+  // Caso real y caro: la regla vieja daba por bueno cualquier nombre que fuera
+  // SUBCADENA de otro. Como "semilladeahorro" contiene "adeahorro", las once
+  // socias de "Semilla de Ahorro" entraron en "ADE AHORRO", que es el grupo de
+  // otra persona, y no lo dijo nada.
+  preparar();
+  e = await baseScenario({ groupId: 'IMH' });
+  seedGroup({ id: 'ADEAH', nombre: 'ADE AHORRO', presidente: e.users.ajeno.email });
+  seedLink(e.users.ajeno.email, 'ADEAH', 'presidente');
+  hoja.invalidarTodo();
+
+  r = await importar(nominaDe(4, 'Semilla de Ahorro', 'semilla'), e.tokens.admin);
+  const s17 = (r.body && r.body.summary) || {};
+  t.eq('se crea un grupo NUEVO, no se mete en el parecido', s17.createdGroups, 1);
+  const destino17 = (s17.grupos || [])[0] || {};
+  t.eq('y el destino se llama como dice el Excel', destino17.seLlama, 'Semilla de Ahorro');
+  t.eq('ADE AHORRO se queda como estaba, con su presidenta y nadie mas',
+    filasDe('UserGroupLinks').filter((f) => f[1] === 'ADEAH').length, 1);
+
+  // ===================================================================
+  t.section('IMP 18. Una errata de una letra SI se reconoce, y avisa');
+  // ===================================================================
+  // "Banquito de ahorros" contra "Banquio de ahorros" (falta la t) es la
+  // erratita real de la nomina: eso si tiene que unirse, pero diciendolo.
+  preparar();
+  e = await baseScenario({ groupId: 'IMI' });
+  seedGroup({ id: 'BANQ', nombre: 'Banquio de ahorros', presidente: e.users.ajeno.email });
+  seedLink(e.users.ajeno.email, 'BANQ', 'presidente');
+  hoja.invalidarTodo();
+
+  r = await importar(nominaDe(3, 'Banquito de ahorros', 'banq'), e.tokens.admin);
+  const s18 = (r.body && r.body.summary) || {};
+  t.eq('no crea un grupo repetido', s18.createdGroups, 0);
+  t.eq('entra en el que ya existia',
+    filasDe('UserGroupLinks').filter((f) => f[1] === 'BANQ').length, 4);
+  t.check('y lo avisa por escrito',
+    (s18.avisos || []).some((x) => x.includes('Banquio de ahorros')),
+    JSON.stringify(s18.avisos));
+
+  // ===================================================================
+  t.section('IMP 19. Deshacer un vinculo que metio una importacion');
+  // ===================================================================
+  preparar();
+  e = await baseScenario({ groupId: 'IMJ' });
+  hoja.invalidarTodo();
+  await importar(nominaDe(3, 'Para deshacer', 'desh'), e.tokens.admin);
+  const gidDesh = (filasDe('Groups').find((f) => f[1] === 'Para deshacer') || [])[0];
+
+  // Quien no es admin, ni de lejos.
+  for (const [quien, tk] of [
+    ['la presidencia de un grupo', e.tokens.presi],
+    ['una socia', e.tokens.socio1],
+  ]) {
+    const neg = await post('/api/admin/retirar-vinculo',
+      { Email: 'desh2@aguinaldo.test', GroupID: gidDesh }, tk);
+    t.status(`${quien} no puede retirar vinculos`, neg, 403);
+  }
+
+  let ret = await post('/api/admin/retirar-vinculo',
+    { Email: 'desh2@aguinaldo.test', GroupID: gidDesh }, e.tokens.admin);
+  t.status('el administrador si, si no hay movimiento', ret, 200);
+  t.eq('y el grupo se queda con dos',
+    filasDe('UserGroupLinks').filter((f) => f[1] === gidDesh && (f[4] || '') !== 'inactivo').length, 2);
+  t.check('la fila NO se borra, se marca inactiva (queda el rastro)',
+    filasDe('UserGroupLinks').some((f) => f[0] === 'desh2@aguinaldo.test' && f[4] === 'inactivo'),
+    JSON.stringify(filasDe('UserGroupLinks').filter((f) => f[1] === gidDesh).map((f) => f[0] + ':' + f[4])));
+
+  // Repetirlo no rompe nada.
+  ret = await post('/api/admin/retirar-vinculo',
+    { Email: 'desh2@aguinaldo.test', GroupID: gidDesh }, e.tokens.admin);
+  t.status('repetirlo responde sin romperse', ret, 200);
+  t.check('y dice que ya estaba', ret.body && ret.body.yaEstaba === true, JSON.stringify(ret.body));
+
+  // A quien no existe.
+  const noHay = await post('/api/admin/retirar-vinculo',
+    { Email: 'nadie@juntago.test', GroupID: gidDesh }, e.tokens.admin);
+  t.status('a quien no esta en el grupo, 404', noHay, 404);
+
+  // ===================================================================
+  t.section('IMP 20. A quien tiene dinero en el grupo NO se le toca');
+  // ===================================================================
+  // Es el limite que hace seguro lo anterior: sin esto, el administrador de la
+  // plataforma tendria por la puerta de atras el poder de expulsar socias de
+  // una caja en marcha, que es justo lo que la separacion impide.
+  preparar();
+  e = await baseScenario({ groupId: 'IMK' });
+  hoja.invalidarTodo();
+  await importar(nominaDe(3, 'Con dinero', 'plata'), e.tokens.admin);
+  const gidPlata = (filasDe('Groups').find((f) => f[1] === 'Con dinero') || [])[0];
+
+  fake.ensureSheet('Savings').grid.push([
+    'plata2@aguinaldo.test', gidPlata, 50, '2026-03-10', 'mensual', 'aporte',
+    'confirmado', 'a@a.test', 'b@b.test', new Date().toISOString(), 'sav_x', '',
+  ]);
+  hoja.invalidarTodo();
+
+  const conPlata = await post('/api/admin/retirar-vinculo',
+    { Email: 'plata2@aguinaldo.test', GroupID: gidPlata }, e.tokens.admin);
+  t.status('se niega', conPlata, 409);
+  t.eq('con un motivo que se puede leer en pantalla',
+    conPlata.body && conPlata.body.codigo, 'TIENE_MOVIMIENTO');
+  t.check('y dice cuanto movimiento tiene',
+    !!(conPlata.body && conPlata.body.movimiento && conPlata.body.movimiento.ahorros === 1),
+    JSON.stringify(conPlata.body && conPlata.body.movimiento));
+  t.eq('sigue dentro del grupo',
+    filasDe('UserGroupLinks').filter((f) => f[1] === gidPlata && (f[4] || '') !== 'inactivo').length, 3);
+
+  // Tampoco a quien preside.
+  const laPresi = filasDe('UserGroupLinks').find((f) => f[1] === gidPlata && f[3] === 'presidente');
+  const contraPresi = await post('/api/admin/retirar-vinculo',
+    { Email: laPresi[0], GroupID: gidPlata }, e.tokens.admin);
+  t.status('a la presidencia tampoco', contraPresi, 409);
+  t.eq('y se dice por que', contraPresi.body && contraPresi.body.codigo, 'ES_LA_PRESIDENCIA');
 
   // ===================================================================
   t.section('IMP 9. Una formula del Excel no se ejecuta en la hoja');

@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.16-directiva-vacante';
+const BACKEND_VERSION = '2026.09.16-grupos-estrictos';
 
 let gobApi = null;
 
@@ -4081,7 +4081,25 @@ const levenshteinDistance = (a, b) => {
     return matrix[left.length][right.length];
 };
 
-const resolveImportGroupId = (rawGroup, groupsLookup) => {
+/**
+ * A que grupo de la hoja corresponde lo que dice la columna Group del Excel.
+ *
+ * ESTO ERA DEMASIADO CONFIADO Y COSTO CARO. La regla vieja daba por bueno
+ * cualquier nombre que fuera SUBCADENA de otro, y como "semilladeahorro"
+ * contiene "adeahorro", las once personas de "Semilla de Ahorro" entraron en
+ * "ADE AHORRO", el grupo de otra persona, sin que nada lo dijera. El umbral de
+ * parecido tambien era bajo (0,82).
+ *
+ * El dano no es simetrico: un grupo de mas se ve en el acto y se corrige,
+ * pero once socias metidas en la caja de otro grupo no las ve nadie. Asi que
+ * ahora solo se empareja con el nombre EXACTO (ya sin tildes, mayusculas ni
+ * espacios) o con una erratita de una letra o dos sobre un nombre largo, y esa
+ * segunda via siempre deja aviso. Cualquier otra cosa crea un grupo nuevo.
+ */
+const PARECIDO_MINIMO_GRUPO = 0.92;
+const LARGO_MINIMO_GRUPO = 8;
+
+const resolveImportGroupId = (rawGroup, groupsLookup, avisos) => {
     const groupRef = normalizeImportCell(rawGroup);
     if (!groupRef) return '';
     const key = normalizeImportLookupKey(groupRef);
@@ -4093,23 +4111,26 @@ const resolveImportGroupId = (rawGroup, groupsLookup) => {
     const byNameMatch = groupsLookup.byName.get(key);
     if (byNameMatch) return byNameMatch;
 
-    const partialMatch = (groupsLookup.names || []).find((entry) => (
-        entry.normalizedName.includes(key) || key.includes(entry.normalizedName)
-    ));
-    if (partialMatch?.groupId) return partialMatch.groupId;
-
     let best = null;
     for (const entry of (groupsLookup.names || [])) {
-        const longest = Math.max(key.length, entry.normalizedName.length);
-        if (!longest) continue;
-        const distance = levenshteinDistance(key, entry.normalizedName);
-        const similarity = 1 - (distance / longest);
+        const largo = Math.max(key.length, entry.normalizedName.length);
+        if (!largo) continue;
+        const similarity = 1 - (levenshteinDistance(key, entry.normalizedName) / largo);
         if (!best || similarity > best.similarity) {
-            best = { similarity, groupId: entry.groupId };
+            best = { similarity, groupId: entry.groupId, groupName: entry.groupName };
         }
     }
 
-    if (best && best.similarity >= 0.82) {
+    if (best
+        && best.similarity >= PARECIDO_MINIMO_GRUPO
+        && key.length >= LARGO_MINIMO_GRUPO
+        && normalizeImportLookupKey(best.groupName).length >= LARGO_MINIMO_GRUPO) {
+        if (Array.isArray(avisos)) {
+            avisos.push(
+                `El Excel dice "${groupRef}" y se ha usado el grupo "${best.groupName}", que ya existia `
+                + 'y se escribe casi igual. Si no era ese, corrige el nombre en el Excel y vuelve a subirlo.'
+            );
+        }
         return best.groupId;
     }
 
@@ -4283,7 +4304,7 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
         const groupReference = normalizeImportCell(pickFirstValue(row, ['GroupID', 'groupId', 'Group', 'group', 'Grupo', 'grupo', 'GroupName', 'groupName', 'NombreGrupo']));
         if (!groupReference) continue;
 
-        let resolvedGroupId = resolveImportGroupId(groupReference, groupsLookup);
+        let resolvedGroupId = resolveImportGroupId(groupReference, groupsLookup, summary.avisos);
         const groupRefLooksLikeId = isLikelyGroupIdReference(groupReference);
         if (!resolvedGroupId && !groupRefLooksLikeId) {
             try {
@@ -4790,6 +4811,112 @@ app.post('/api/desvincular-usuario-grupo', bloquear(() => 'hoja:UserGroupLinks')
         console.error('[DESVINCULAR USUARIO-GRUPO] Error:', error.message, error.stack);
         if (responderSiEsCuota(res, error)) return;
         res.status(500).json({ message: 'Error al desvincular usuario del grupo.', error: error.message });
+    }
+});
+
+/**
+ * Cuanto dinero ha movido esta persona DENTRO de ese grupo.
+ *
+ * Es el freno del endpoint de abajo: deshacer una importacion es borrar una
+ * fila que nunca se uso, no sacar a una socia de una caja donde tiene ahorros.
+ */
+async function movimientoEnGrupo(sheetsClient, email, groupId) {
+    const e = normalizeEmailKey(email);
+    const g = normalizeGroupKey(groupId);
+    const contar = async (rango, colEmail, colGrupo) => {
+        try {
+            const r = await sheetsClient.spreadsheets.values.get({
+                spreadsheetId: SPREADSHEET_ID, range: rango,
+            });
+            return (r.data.values || []).filter((f) => (
+                normalizeEmailKey(f[colEmail]) === e && normalizeGroupKey(f[colGrupo]) === g
+            )).length;
+        } catch (err) {
+            // Que la pestana no exista es normal en un libro recien creado.
+            // Cualquier OTRO fallo sube: ante la duda no se retira a nadie.
+            if (/Unable to parse range/i.test(err && err.message)) return 0;
+            throw err;
+        }
+    };
+    const [ahorros, acciones, prestamos] = await Promise.all([
+        contar('Savings!A2:L', 0, 1),
+        contar('Acciones!A2:M', 0, 1),
+        contar('Loans!A2:K', 1, 2),
+    ]);
+    return { ahorros, acciones, prestamos, total: ahorros + acciones + prestamos };
+}
+
+/**
+ * DESHACER UN VINCULO QUE METIO UNA IMPORTACION.
+ *
+ * El administrador de la plataforma no gobierna grupos y no puede expulsar a
+ * nadie: eso es de la directiva. Pero SI tiene que poder deshacer sus propios
+ * errores de carga, y hasta ahora no podia. Paso dos veces el mismo dia: dos
+ * personas quedaron duplicadas en "Mi aguinaldo" con el correo mal escrito, y
+ * once socias entraron en el grupo equivocado porque el nombre se parecia.
+ *
+ * El limite que lo hace seguro: solo se puede retirar a quien NO ha movido
+ * nada en ese grupo (ni un ahorro, ni una accion, ni un prestamo). Con eso no
+ * hay forma de usarlo para sacar a una socia de una caja en marcha, que es lo
+ * que la separacion protege. Tampoco se retira a la presidencia.
+ *
+ * No borra la fila: la marca inactiva, asi que queda el rastro y se puede
+ * volver a activar.
+ */
+app.post('/api/admin/retirar-vinculo', requireAdmin, bloquear(() => 'hoja:UserGroupLinks'), async (req, res) => {
+    const Email = normalize(req.body?.Email || req.body?.UserEmail || req.body?.email);
+    const GroupID = (req.body?.GroupID || req.body?.groupId || '').toString().trim();
+    if (!Email || !GroupID) {
+        return res.status(400).json({ success: false, message: 'Faltan datos: Email y GroupID.' });
+    }
+    try {
+        const sheetsClient = await getSheetsClient();
+        const resp = await sheetsClient.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID, range: 'UserGroupLinks!A2:F',
+        });
+        const rows = resp.data.values || [];
+        const idx = rows.findIndex((r) => (
+            normalizeEmailKey(r[0]) === normalizeEmailKey(Email)
+            && normalizeGroupKey(r[1]) === normalizeGroupKey(GroupID)
+        ));
+        if (idx === -1) {
+            return res.status(404).json({ success: false, message: 'Esa persona no esta en ese grupo.' });
+        }
+        if (!linkIsActive(rows[idx])) {
+            return res.json({ success: true, yaEstaba: true, message: 'Ya estaba retirada de ese grupo.' });
+        }
+        if (normalizeGroupRole(rows[idx][3]) === 'presidente') {
+            return res.status(409).json({
+                success: false,
+                codigo: 'ES_LA_PRESIDENCIA',
+                message: 'No se retira a quien preside el grupo: primero el grupo tiene que pasar la presidencia a otra persona.',
+            });
+        }
+
+        const mov = await movimientoEnGrupo(sheetsClient, Email, GroupID);
+        if (mov.total > 0) {
+            return res.status(409).json({
+                success: false,
+                codigo: 'TIENE_MOVIMIENTO',
+                movimiento: mov,
+                message: `Esta persona ya tiene movimiento en el grupo (${mov.ahorros} ahorro(s), `
+                       + `${mov.acciones} accion(es), ${mov.prestamos} prestamo(s)), asi que sacarla `
+                       + 'de aqui es cosa de la directiva del grupo, no del administrador de la plataforma.',
+            });
+        }
+
+        await sheetsClient.spreadsheets.values.update({
+            spreadsheetId: SPREADSHEET_ID,
+            range: `UserGroupLinks!E${idx + 2}`,
+            valueInputOption: 'RAW',
+            resource: { values: [['inactivo']] },
+        });
+        revocarComprobantes(Email);
+        return res.json({ success: true, message: 'Vinculo retirado.', email: Email, grupo: GroupID });
+    } catch (error) {
+        console.error('[RETIRAR-VINCULO]', error.message);
+        if (responderSiEsCuota(res, error)) return;
+        return res.status(500).json({ success: false, message: 'Error al retirar el vinculo.', error: error.message });
     }
 });
 
