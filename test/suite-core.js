@@ -192,4 +192,27 @@ module.exports = async function run() {
   t.check('la descripcion con formula se guarda neutralizada con apostrofo',
     !inyectada || inyectada[5].toString().startsWith("'"),
     `valor guardado: ${inyectada ? inyectada[5] : '(no se encontro)'}`);
+
+  // ===================================================================
+  t.section('SOC. Los grupos del socio llegan con cuantas socias tienen');
+  // ===================================================================
+  // La pantalla de inicio decia "0 miembros" en un grupo de trece porque este
+  // dato no viajaba, y el importe salia en $0,00 porque la columna
+  // CurrentAmount de la hoja no la actualiza nadie (los aportes van a Savings).
+  {
+    const { seedWorkbook: sw2, get: g2 } = require('./harness');
+    const esc2 = require('./scenario');
+    const hj2 = require('../hoja');
+    sw2();
+    hj2.invalidarTodo();
+    const e2 = await esc2.baseScenario({ groupId: 'SOC1' });
+    const r2 = await g2(`/api/grupos-del-usuario?userEmail=${encodeURIComponent(e2.users.socio1.email)}`,
+      e2.tokens.socio1);
+    t.status('responde', r2, 200);
+    const suyo = ((r2.body || {}).grupos || []).find((x) => x.groupId === 'SOC1');
+    t.check('trae su grupo', !!suyo, JSON.stringify((r2.body || {}).grupos || []));
+    t.eq('con el numero de socias, que son cinco', suyo && suyo.miembros, 5);
+    t.check('y como NUMERO, no como lista', typeof (suyo || {}).miembros === 'number',
+      typeof (suyo || {}).miembros);
+  }
 };

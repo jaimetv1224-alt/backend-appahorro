@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.16-auditoria-2';
+const BACKEND_VERSION = '2026.09.16-auditoria-3';
 
 let gobApi = null;
 
@@ -645,6 +645,17 @@ app.get('/api/grupos-del-usuario', async (req, res) => {
       .filter((row) => (row[11] || '').toString().trim().toLowerCase() === 'eliminado')
       .map((row) => (row[0] || '').toString().trim()));
 
+    // Cuantas socias tiene cada grupo. Sale de las filas que YA se leyeron para
+    // saber a que grupos pertenece esta persona, asi que no cuesta ni una
+    // lectura mas. La pantalla de inicio pintaba "0 miembros" en un grupo de
+    // trece porque este dato no viajaba.
+    const sociasPorGrupo = new Map();
+    rows.forEach((row) => {
+      const gid = (row[1] || '').toString().trim();
+      if (!gid || !vinculoVivo(row[4])) return;
+      sociasPorGrupo.set(gid, (sociasPorGrupo.get(gid) || 0) + 1);
+    });
+
     const result = userGroups
       .filter((g) => !dadosDeBaja.has((g.groupId || '').toString().trim()))
       .map(g => {
@@ -661,6 +672,7 @@ app.get('/api/grupos-del-usuario', async (req, res) => {
         TipoGrupo: found ? (found[14] || '') : '',
         ValorAccion: found ? (found[15] || '') : '',
         PorcentajeInteresMensual: found ? (found[16] || '') : '',
+        miembros: sociasPorGrupo.get((g.groupId || '').toString().trim()) || 0,
         // El ciclo del grupo: la directiva los edita en su propia pantalla, asi
         // que tienen que llegarle para poder rellenar el formulario.
         // 6=TargetAmount, 8=MonthlyContribution, 9=StartDate, 10=EndDate, 12=MaxMembers
