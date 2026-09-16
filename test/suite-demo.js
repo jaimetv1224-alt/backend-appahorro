@@ -327,6 +327,13 @@ module.exports = async function run() {
   e = await baseScenario({ groupId: 'DMD' });
   const acc = require('../accesos');
   fake.seedSheet(acc.HOJA, [acc.CABECERA]);
+  // seedUser pone la fecha de alta en HOY, y en la realidad las cuentas son de
+  // hace meses. Sin envejecerlas no hay ventana donde repartir las entradas.
+  filasDe('Users').slice(1).forEach((f, i) => {
+    const d = new Date();
+    d.setMonth(d.getMonth() - (8 - (i % 4)));
+    f[5] = d.toISOString();
+  });
   hoja.invalidarTodo();
   await post('/api/admin/demo/sembrar', {}, e.tokens.admin);
 
@@ -355,6 +362,28 @@ module.exports = async function run() {
   });
   const ahora = Date.now();
   const dentroDe = (dias) => [...ultimaDe.values()].filter((x) => (ahora - x) / 86400000 <= dias).length;
+  // La primera entrada se mide desde que se CREO LA CUENTA. Si se sembraba al
+  // arrancar el grupo, a quien se registro el anio anterior le salia una espera
+  // de 172 dias y el indicador de onboarding no medía friccion, sino la
+  // distancia entre registrarse y digitalizar el grupo.
+  const usuarios = cuerpo('Users');
+  const altaDe = new Map(usuarios
+    .filter((f) => f[1] && /^\d{4}-\d{2}-\d{2}/.test(String(f[5] || '')))
+    .map((f) => [String(f[1]).toLowerCase(), String(f[5]).slice(0, 10)]));
+  const primeraDe = new Map();
+  entradas.forEach((f) => {
+    const t2 = new Date(f[0]).getTime();
+    if (!primeraDe.has(f[1]) || t2 < primeraDe.get(f[1])) primeraDe.set(f[1], t2);
+  });
+  const esperas = [...primeraDe.entries()]
+    .filter(([correo]) => altaDe.has(correo))
+    .map(([correo, t2]) => (t2 - new Date(`${altaDe.get(correo)}T00:00:00Z`).getTime()) / 86400000);
+  t.check('hay esperas que medir', esperas.length > 0, `${esperas.length}`);
+  t.check('nadie tarda meses en abrir la app por primera vez',
+    Math.max(...esperas) <= 12, `el peor tardo ${Math.max(...esperas).toFixed(1)} dias`);
+  t.check('y nadie entra antes de tener cuenta',
+    Math.min(...esperas) >= 0, `el minimo fue ${Math.min(...esperas).toFixed(1)}`);
+
   t.check('unas siguen entrando y otras lo dejaron hace meses',
     dentroDe(7) < dentroDe(60),
     `activas 7 dias: ${dentroDe(7)} | 60 dias: ${dentroDe(60)} | total ${ultimaDe.size}`);

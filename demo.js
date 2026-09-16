@@ -33,6 +33,7 @@ const CARGOS = ['presidente', 'tesorero', 'secretario'];
 
 // Donde esta cada cosa en cada hoja.
 const GRP = { id: 0, nombre: 1, aporte: 8, inicio: 9, estado: 11, valorAccion: 15, interes: 16 };
+const USR = { nombre: 0, email: 1, alta: 5 };
 const LINK = { email: 0, group: 1, alta: 2, rol: 3, estado: 4 };
 const SAV = { email: 0, group: 1, monto: 2, fecha: 3, desc: 5, estado: 6, id: 10 };
 const ACC = { email: 0, group: 1, fecha: 2, cantidad: 3, valor: 4, estado: 7, id: 11, nota: 12 };
@@ -147,7 +148,8 @@ module.exports.register = function register(app, ctx) {
       const sheetsClient = await getSheetsClient();
 
       // --- una lectura de cada cosa, y a trabajar en memoria ---------------
-      const [grupos, vinculos, ahorros, acciones, prestamos] = await Promise.all([
+      const [usuarios, grupos, vinculos, ahorros, acciones, prestamos] = await Promise.all([
+        leer(sheetsClient, 'Users!A2:I'),
         leer(sheetsClient, 'Groups!A2:Q'),
         leer(sheetsClient, 'UserGroupLinks!A2:F'),
         leer(sheetsClient, 'Savings!A2:L'),
@@ -173,6 +175,17 @@ module.exports.register = function register(app, ctx) {
       acciones.forEach((f) => {
         const gid = normalizeGroupKey(f[ACC.group]);
         if (gid && Number(f[ACC.cantidad]) > 0) conAcciones.add(gid);
+      });
+
+      // Cuando se creo cada cuenta. El informe mide "cuanto tardan en entrar la
+      // primera vez" desde ESA fecha, no desde que arranco el grupo: si la
+      // primera entrada se sembraba al empezar el grupo, a quien se habia
+      // registrado el anio anterior le salia una espera de 172 dias.
+      const altaDe = new Map();
+      usuarios.forEach((f) => {
+        const correo = normalizeEmailKey(f[USR.email]);
+        const alta = (f[USR.alta] || '').toString().slice(0, 10);
+        if (correo && /^\d{4}-\d{2}-\d{2}$/.test(alta)) altaDe.set(correo, alta);
       });
 
       // Socias y cargos por grupo.
@@ -390,29 +403,53 @@ module.exports.register = function register(app, ctx) {
           ['movil', 'iOS', 'Safari'], ['escritorio', 'Windows 10/11', 'Chrome']];
         let nEntradas = 0;
         let nQueEntraron = 0;
-        datos.socias.forEach((s, idx) => {
+        datos.socias.forEach((s) => {
           if (azar() > 0.72) return;                    // no todas llegan a entrar
-          nQueEntraron += 1;
           const aparato = APARATOS[Math.floor(azar() * APARATOS.length)];
-          const primera = 2 + Math.floor(azar() * 25);  // dias desde que arranco el grupo
-          const cuantas = 1 + Math.floor(azar() * 14);
-          const constante = azar() < 0.55;              // si sigue entrando hasta hoy
-          const diasDeVida = Math.round((hoy - new Date(`${anioIni}-${dosDigitos(mesIni)}-01T00:00:00Z`)) / 86400000);
-          // Cada persona deja de entrar en un momento distinto. Si todas las
-          // constantes entraran ayer, "activas en 7 dias" y "activas en 30"
-          // darian el MISMO numero y la retencion saldria identica en ambos
-          // plazos: se nota a la legua que el dato esta puesto a mano.
+
+          // La ventana de cada persona va desde que PUEDE usar la app hasta
+          // hoy. "Puede" es lo mas tarde entre que arranco su grupo y que se
+          // creo su cuenta: nadie abre la app antes de tener cuenta, y el
+          // informe mide la primera entrada contra la fecha de alta.
+          const arranqueMs = new Date(`${anioIni}-${dosDigitos(mesIni)}-01T00:00:00Z`).getTime();
+          const alta = altaDe.get(s.email);
+          const altaMs = alta ? new Date(`${alta}T00:00:00Z`).getTime() : arranqueMs;
+          const margenMs = hoy.getTime() - altaMs;
+          if (margenMs <= 0) return;                    // se registro hoy mismo
+
+          nQueEntraron += 1;
+          const DIA = 86400000;
+          // LA PRIMERA ENTRADA CUELGA DEL ALTA, no del arranque del grupo:
+          // quien se registra abre la app esos mismos dias para mirar, aunque
+          // su grupo empiece a ahorrar meses despues. Colgarla del grupo daba
+          // una mediana de onboarding de 172 dias, que no mide friccion sino
+          // la distancia entre registrarse y digitalizar el grupo.
+          const desdeMs = altaMs;
+          const primeraMs = altaMs + Math.min(margenMs, (1 + Math.floor(azar() * 9)) * DIA);
+          // El resto son entradas de uso, y esas SI empiezan cuando el grupo
+          // arranca: antes no habia nada que consultar.
+          const actividadMs = Math.max(arranqueMs, primeraMs);
+          const constante = azar() < 0.55;
           const hasta = constante ? (0.82 + azar() * 0.18) : (0.28 + azar() * 0.45);
-          const ventana = Math.round(diasDeVida * hasta);
-          for (let k = 0; k < cuantas; k += 1) {
-            const dia = Math.min(diasDeVida - 1, primera + Math.floor((ventana - primera) * (k / Math.max(1, cuantas - 1))));
-            if (dia < 0) continue;
+          const finMs = Math.max(actividadMs,
+            actividadMs + Math.round((hoy.getTime() - actividadMs) * hasta));
+          const cuantas = 1 + Math.floor(azar() * 14);
+
+          const apunta = (ms) => {
+            const d = new Date(ms);
+            d.setUTCHours(7 + Math.floor(azar() * 13), Math.floor(azar() * 60), 0, 0);
+            const cuando = d.getTime();
+            if (cuando < desdeMs || cuando > hoy.getTime()) return;
             filasAccesos.push([
-              masDias(`${anioIni}-${dosDigitos(mesIni)}-01`, dia, 7 + Math.floor(azar() * 13)),
-              s.email, aparato[0], aparato[1], aparato[2], '190.0.0.1',
-              `${aparato[2]} ${MARCA}`, 'demo',
+              new Date(cuando).toISOString(), s.email, aparato[0], aparato[1], aparato[2],
+              '190.0.0.1', `${aparato[2]} ${MARCA}`, 'demo',
             ]);
             nEntradas += 1;
+          };
+
+          apunta(primeraMs);
+          for (let k = 1; k < cuantas; k += 1) {
+            apunta(actividadMs + Math.round((finMs - actividadMs) * (k / Math.max(1, cuantas - 1))));
           }
         });
 
