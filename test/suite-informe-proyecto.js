@@ -185,6 +185,84 @@ module.exports = async function run() {
   t.check('y ahi gasta 6 o menos', gastadas2 <= 6, `gasto ${gastadas2}`);
 
   // ===================================================================
+  t.section('INF 8. Con la cuota agotada NO se entrega un informe de ceros');
+  // ===================================================================
+  // Antes cualquier fallo de lectura devolvia vacio, asi que con la cuota de
+  // Google agotada el informe salia entero de ceros con HTTP 200 y
+  // success:true: cero ahorros, cero prestamos, cero asambleas. Indistinguible
+  // de un proyecto que no ha arrancado. Y ese informe es el que se entrega al
+  // INCYT.
+  preparar();
+  e = await baseScenario({ groupId: 'IP8' });
+  ahorro(e.users.socio1.email, 'IP8', 500, '2026-02-10');
+  hoja.invalidarTodo();
+
+  const bueno = await get('/api/admin/informe-proyecto', e.tokens.admin);
+  t.status('primero, un informe normal', bueno, 200);
+  const g8 = filasDe(bueno, 'Grupos').find((x) => x.GrupoID === 'IP8');
+  t.near('con su ahorro', g8 && g8['Ahorro confirmado'], 500, 0.01);
+
+  // Si solo falla la lectura agrupada, el respaldo lee una por una y el informe
+  // sale COMPLETO: eso tiene que seguir funcionando.
+  hoja.invalidarTodo();
+  fake.fallarEn('batchGet', '', 1, 'Quota exceeded for quota metric');
+  const conRespaldo = await get('/api/admin/informe-proyecto', e.tokens.admin);
+  t.status('si solo falla la lectura agrupada, el respaldo salva el informe', conRespaldo, 200);
+  t.near('y sale con sus cifras de verdad',
+    (filasDe(conRespaldo, 'Grupos').find((x) => x.GrupoID === 'IP8') || {})['Ahorro confirmado'], 500, 0.01);
+
+  // Pero si la cuota esta agotada de verdad y NO se puede leer nada, el informe
+  // no puede salir de ceros con HTTP 200: hay que decir que no se pudo.
+  hoja.invalidarTodo();
+  // Y si la hoja no se deja leer, el informe tiene que DECIRLO. Tres detalles
+  // que costo acertar y que conviene no perder:
+  //  - NO se tumba la lectura de Users: esa la usa requireAuth para comprobar
+  //    la sesion, y si tambien falla el error lo devuelve la puerta de entrada
+  //    y la prueba ni llega a mirar el informe (pasaba en verde en falso).
+  //  - la lectura agrupada se intenta DOS veces, asi que hay que tumbar las dos.
+  //  - el error NO es de cuota a proposito: hoja.js reintenta tres veces los de
+  //    cuota y acabaria saliendo bien, que es justo lo que debe hacer.
+  fake.fallarEn('batchGet', '', 5, 'Fallo duro de la hoja');
+  fake.fallarEn('get', '^(?!Users)', 60, 'Fallo duro de la hoja');
+  const roto = await get('/api/admin/informe-proyecto', e.tokens.admin);
+  t.check('si no se puede leer, el informe NO sale con ceros y HTTP 200',
+    roto.status !== 200, `respondio ${roto.status}`);
+  t.check('y lo dice', roto.status >= 400 && roto.body && roto.body.success === false,
+    JSON.stringify(roto.body).slice(0, 160));
+
+  // ===================================================================
+  t.section('INF 9. El informe avisa de cuanto es demostracion');
+  // ===================================================================
+  // Lo sembrado lleva la marca 'demo_' en su identificador, pero ningun lector
+  // la miraba: los totales podian ser inventados al 100 % sin que nada lo
+  // dijera.
+  preparar();
+  e = await baseScenario({ groupId: 'IP9' });
+  ahorro(e.users.socio1.email, 'IP9', 40, '2026-03-10');
+  // Un aporte sembrado, con su marca.
+  fake.ensureSheet('Savings').grid.push([
+    e.users.socio2.email, 'IP9', 60, '2026-03-11', 'mensual', 'Aporte mensual [demo]',
+    'confirmado', 'a@a.test', 'b@b.test', '2026-03-12T10:00:00.000Z', 'demo_sav_x1', '',
+  ]);
+  hoja.invalidarTodo();
+
+  r = await get('/api/admin/informe-proyecto', e.tokens.admin);
+  t.status('el informe responde', r, 200);
+  const resumen9 = filasDe(r, 'Resumen');
+  const aviso = resumen9.find((x) => /demostracion/i.test(String(x.Concepto)));
+  t.check('avisa de que hay datos de demostracion', !!aviso, JSON.stringify(resumen9.map((x) => x.Concepto)));
+  t.check('y dice cuantos', !!aviso && /1 aportes/.test(String(aviso.Valor)), JSON.stringify(aviso && aviso.Valor));
+
+  // Sin nada sembrado, el aviso no aparece: no se alarma sin motivo.
+  preparar();
+  e = await baseScenario({ groupId: 'IP9B' });
+  ahorro(e.users.socio1.email, 'IP9B', 40, '2026-03-10');
+  hoja.invalidarTodo();
+  const limpio = await get('/api/admin/informe-proyecto', e.tokens.admin);
+  t.check('sin datos sembrados no hay aviso',
+    !filasDe(limpio, 'Resumen').some((x) => /demostracion/i.test(String(x.Concepto))), '');
+
+  // ===================================================================
   t.section('INF 7. La pantalla de grupos tambien gasta una sola lectura');
   // ===================================================================
   // Es la que mas se abre, y era la que mas gastaba: cuatro lecturas sueltas

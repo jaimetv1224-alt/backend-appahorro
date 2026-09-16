@@ -36,6 +36,10 @@ module.exports = async function run() {
   // ===================================================================
   preparar();
   let e = await baseScenario({ groupId: 'DM1' });
+  // El grupo arranca SIN valor de accion, que es el caso que hay que resolver:
+  // sin esa cifra no se pueden comprar acciones ni calcular un prestamo. Lo que
+  // ya esta decidido no se toca, y eso lo fija DEM 20.
+  filasDe('Groups').find((f) => f[0] === 'DM1')[15] = '';
   hoja.invalidarTodo();
 
   let r = await post('/api/admin/demo/sembrar', { valorAccion: 15 }, e.tokens.admin);
@@ -486,6 +490,81 @@ module.exports = async function run() {
     { Email: e.users.socio2.email, GroupID: gidE }, e.tokens.admin);
   t.check('retirar un vinculo tampoco se cae por eso',
     ret2.status === 200 || ret2.status === 409, `respondio ${ret2.status}`);
+
+  // ===================================================================
+  t.section('DEM 18. Nada de lo sembrado ocurre en el futuro');
+  // ===================================================================
+  // Un aporte, una compra o una cuota con fecha posterior a hoy sale en el
+  // informe del proyecto como actividad de un mes que todavia no ha ocurrido,
+  // y el propio backend rechaza esas fechas cuando las escribe una persona.
+  preparar();
+  e = await baseScenario({ groupId: 'DMF' });
+  hoja.invalidarTodo();
+  await post('/api/admin/demo/sembrar', {}, e.tokens.admin);
+
+  const hoyMs = Date.now();
+  const futuras = [];
+  cuerpo('Savings').filter((f) => esDemo(f[10]))
+    .forEach((f) => { if (new Date(`${f[3]}T00:00:00Z`).getTime() > hoyMs) futuras.push(`aporte ${f[3]}`); });
+  cuerpo('Acciones').filter((f) => esDemo(f[11]))
+    .forEach((f) => { if (new Date(`${f[2]}T00:00:00Z`).getTime() > hoyMs) futuras.push(`accion ${f[2]}`); });
+  cuerpo('LoanPayments').filter((f) => esDemo(f[0]))
+    .forEach((f) => { if (new Date(`${f[4]}T00:00:00Z`).getTime() > hoyMs) futuras.push(`cuota ${f[4]}`); });
+  cuerpo('Loans').filter((f) => esDemo(f[0]))
+    .forEach((f) => { if (new Date(`${f[4]}T00:00:00Z`).getTime() > hoyMs) futuras.push(`prestamo ${f[4]}`); });
+  t.eq('ni una sola fila con fecha posterior a hoy', futuras.length, 0,
+    JSON.stringify(futuras.slice(0, 6)));
+
+  // Y la confirmacion nunca puede ser anterior al hecho.
+  const alReves = cuerpo('Savings').filter((f) => esDemo(f[10]))
+    .filter((f) => new Date(f[9]).getTime() < new Date(`${f[3]}T00:00:00Z`).getTime());
+  t.eq('ningun aporte se confirma antes de hacerse', alReves.length, 0);
+
+  // ===================================================================
+  t.section('DEM 19. Dos grupos sembrados no comparten identificadores');
+  // ===================================================================
+  // Todo grupo creado desde la app tiene un id que empieza por 'grupo_', y
+  // antes la marca de la fila salia de gid.slice(0, 6): los seis primeros
+  // caracteres eran los MISMOS para todos. Dos grupos producian filas con el
+  // mismo identificador, y eso rompe cualquier cosa que enlace por id.
+  preparar();
+  e = await baseScenario({ groupId: 'grupo_aaaaaa' });
+  seedUser({ nombre: 'Otra Mas', email: 'otra2@demo.test' });
+  seedGroup({ id: 'grupo_bbbbbb', nombre: 'Hermano', presidente: 'otra2@demo.test' });
+  seedLink('otra2@demo.test', 'grupo_bbbbbb', 'presidente');
+  seedUser({ nombre: 'Tercera', email: 'tercera@demo.test' });
+  seedLink('tercera@demo.test', 'grupo_bbbbbb', 'member');
+  hoja.invalidarTodo();
+  await post('/api/admin/demo/sembrar', {}, e.tokens.admin);
+
+  for (const [etiqueta, nombre, col] of [
+    ['aportes', 'Savings', 10], ['compras', 'Acciones', 11],
+    ['prestamos', 'Loans', 0], ['cuotas', 'LoanPayments', 0],
+    ['asambleas', 'Asambleas', 0], ['acuerdos', 'Acuerdos', 0],
+  ]) {
+    const ids = cuerpo(nombre).filter((f) => esDemo(f[col])).map((f) => f[col]);
+    t.eq(`los identificadores de ${etiqueta} no se repiten`,
+      new Set(ids).size, ids.length,
+      JSON.stringify(ids.filter((x, i) => ids.indexOf(x) !== i).slice(0, 4)));
+  }
+
+  // ===================================================================
+  t.section('DEM 20. No se pisa una cifra que el grupo ya decidio');
+  // ===================================================================
+  // Sembrar sobrescribia el valor de la accion de un grupo que ya operaba con
+  // la cifra que mandara el administrador, y `limpiar` no lo devolvia: la
+  // decision del grupo se perdia para siempre.
+  preparar();
+  e = await baseScenario({ groupId: 'DMG' });
+  seedUser({ nombre: 'Con Regla', email: 'regla@demo.test' });
+  seedGroup({ id: 'DMGR', nombre: 'Ya decidio', presidente: 'regla@demo.test', valorAccion: 7, interesMensual: 3 });
+  seedLink('regla@demo.test', 'DMGR', 'presidente');
+  hoja.invalidarTodo();
+
+  await post('/api/admin/demo/sembrar', { valorAccion: 15, interesMensual: 2 }, e.tokens.admin);
+  const filaR = filasDe('Groups').find((f) => f[0] === 'DMGR');
+  t.eq('la accion sigue valiendo lo que el grupo decidio', Number(filaR[15]), 7);
+  t.eq('y el interes tambien', Number(filaR[16]), 3);
 
   // ===================================================================
   t.section('DEM 8. Lo sembrado se ve en el informe del proyecto');

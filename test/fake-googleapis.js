@@ -218,6 +218,7 @@ const sheetsApi = {
     }),
 
     batchUpdate: async (params) => {
+      quizaFallar('batchUpdate', '');
       store.calls.batchUpdate++;
       const body = params.requestBody || params.resource || {};
       const replies = [];
@@ -263,6 +264,9 @@ const sheetsApi = {
       },
 
       batchGet: async ({ ranges }) => {
+        // El fallo a proposito tambien vale aqui. Antes fallarEn('batchGet')
+        // se quedaba sin consumir y la prueba que lo usaba no comprobaba nada.
+        quizaFallar('batchGet', (ranges || []).join('|'));
         await latencia();
         store.calls.batchGet++;
         return {
@@ -294,6 +298,7 @@ const sheetsApi = {
       },
 
       clear: async ({ range }) => {
+        quizaFallar('clear', range);
         store.calls.clear++;
         clearValues(range);
         return { data: { clearedRange: range } };

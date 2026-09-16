@@ -80,6 +80,20 @@ const mesesHasta = (anioIni, mesIni, hoy) => {
 
 const esDeDemo = (valor) => (valor || '').toString().trim().toLowerCase().startsWith(PREFIJO);
 
+/**
+ * Un trozo corto y UNICO por grupo para los identificadores de las filas.
+ *
+ * Antes se usaba gid.slice(0, 6), y todo grupo creado desde la app tiene un
+ * identificador que empieza por 'grupo_': los seis primeros caracteres eran los
+ * MISMOS para todos. Dos grupos sembrados producian filas con el mismo
+ * identificador, y eso rompe cualquier cosa que enlace por id.
+ */
+const marcaDe = (gid) => {
+  let h = 0;
+  for (const c of String(gid)) h = ((h * 31) + c.charCodeAt(0)) >>> 0;
+  return h.toString(36).padStart(7, '0').slice(-7);
+};
+
 /** Una fecha 'YYYY-MM-DD' mas N dias (y unas horas), como instante ISO. */
 const masDias = (ymd, dias, hora = 10) => {
   const [a, m, d] = String(ymd).split('-').map(Number);
@@ -247,7 +261,11 @@ module.exports.register = function register(app, ctx) {
         // acciones (le cambiaria el patrimonio), y ni el interes ni el aporte
         // pisan un valor que el grupo ya haya decidido.
         const reglamento = [];
-        if (!conAcciones.has(gid) && Number(g[GRP.valorAccion]) !== valorAccion) {
+        // Solo se RELLENA lo que esta vacio; nunca se pisa una cifra que el grupo
+        // ya decidio. Antes se sobrescribia el valor de la accion de un grupo que
+        // ya operaba con la cifra que mandara el administrador, y `limpiar` no lo
+        // devolvia: la decision del grupo se perdia para siempre.
+        if (!conAcciones.has(gid) && !Number(g[GRP.valorAccion])) {
           cambiosGrupo.push({ fila: filaGrupo, col: GRP.valorAccion, valor: valorAccion });
           reglamento.push(`accion $${valorAccion}`);
         }
@@ -313,8 +331,14 @@ module.exports.register = function register(app, ctx) {
           const cuota = [15, 20, 20, 25, 30][Math.floor(azar() * 5)];
           meses.forEach(({ a, m }) => {
             if (azar() < 0.08) return;            // ese mes no aporto
-            const dia = 3 + Math.floor(azar() * 20);
-            const id = `${PREFIJO}sav_${gid.slice(0, 6)}_${idx}_${a}${dosDigitos(m)}`;
+            // En el mes en curso el dia no puede pasar de hoy: un aporte con
+            // fecha futura sale en el informe como actividad de un mes que aun
+            // no ha ocurrido, y el propio backend rechaza esas fechas.
+            const tope = (a === hoy.getUTCFullYear() && m === hoy.getUTCMonth() + 1)
+              ? hoy.getUTCDate() : 23;
+            if (tope < 3) return;
+            const dia = 3 + Math.floor(azar() * (tope - 2));
+            const id = `${PREFIJO}sav_${marcaDe(gid)}_${idx}_${a}${dosDigitos(m)}`;
             const cuando = `${a}-${dosDigitos(m)}-${dosDigitos(dia)}`;
             // La tesoreria confirma al dia siguiente o a los dos dias. Poner
             // aqui la hora de AHORA daba medianas de noventa dias y el informe
@@ -336,8 +360,10 @@ module.exports.register = function register(app, ctx) {
           if (azar() > 0.4) return;
           const cuantas = 1 + Math.floor(azar() * 4);
           const { a, m } = meses[Math.floor(azar() * meses.length)];
-          const id = `${PREFIJO}acc_${gid.slice(0, 6)}_${idx}`;
-          const cuandoAcc = `${a}-${dosDigitos(m)}-10`;
+          const id = `${PREFIJO}acc_${marcaDe(gid)}_${idx}`;
+          const diaAcc = (a === hoy.getUTCFullYear() && m === hoy.getUTCMonth() + 1)
+            ? Math.min(10, hoy.getUTCDate()) : 10;
+          const cuandoAcc = `${a}-${dosDigitos(m)}-${dosDigitos(diaAcc)}`;
           filasAcciones.push([
             s.email, gid, cuandoAcc, cuantas, valorAccion, interesMensual,
             masDias(cuandoAcc, 0), 'confirmado', s.email,
@@ -364,7 +390,7 @@ module.exports.register = function register(app, ctx) {
           const total = Math.round(principal * (1 + (interesMensual / 100) * plazo) * 100) / 100;
           const { a, m } = meses[Math.min(meses.length - 1, 1 + Math.floor(azar() * Math.max(1, meses.length - 2)))];
           const vence = new Date(Date.UTC(a, (m - 1) + plazo, 10)).toISOString().slice(0, 10);
-          const idPrestamo = `${PREFIJO}loan_${gid.slice(0, 6)}_${idx}`;
+          const idPrestamo = `${PREFIJO}loan_${marcaDe(gid)}_${idx}`;
           const fechaPrestamo = `${a}-${dosDigitos(m)}-10`;
           filasPrestamos.push([
             idPrestamo, s.email, gid, principal,
@@ -392,8 +418,11 @@ module.exports.register = function register(app, ctx) {
           const cuota = Math.round((total / plazo) * 100) / 100;
           for (let k = 1; k <= cuotasPagadas; k += 1) {
             const fPago = soloFecha(masDias(fechaPrestamo, 30 * k));
+            // Una cuota pagada y aprobada con fecha futura mete en el informe
+            // meses que todavia no han pasado.
+            if (new Date(`${fPago}T23:59:59Z`) > hoy) break;
             filasPagos.push([
-              `${PREFIJO}pay_${gid.slice(0, 6)}_${idx}_${k}`, s.email, idPrestamo, cuota, fPago,
+              `${PREFIJO}pay_${marcaDe(gid)}_${idx}_${k}`, s.email, idPrestamo, cuota, fPago,
               `Cuota ${k} de ${plazo} ${MARCA}`, 'approved', '', '', '', '',
               masDias(fPago, 0, 9), datos.cargos.get('tesorero') || s.email,
               masDias(fPago, 1, 11), `Revisado ${MARCA}`,
@@ -465,7 +494,7 @@ module.exports.register = function register(app, ctx) {
         if (presi && meses.length >= 2) {
           const { a: aA, m: mA } = meses[Math.max(0, meses.length - 2)];
           const fAsa = `${aA}-${dosDigitos(mA)}-15`;
-          const idAsa = `${PREFIJO}asa_${gid.slice(0, 6)}`;
+          const idAsa = `${PREFIJO}asa_${marcaDe(gid)}`;
           filasAsambleas.push([
             idAsa, gid, `Asamblea mensual ${MARCA}`, fAsa, 'presencial', 'cerrada',
             'Aportes, prestamos y utilidades', presi, masDias(fAsa, -7),
@@ -479,7 +508,7 @@ module.exports.register = function register(app, ctx) {
               idAsa, gid, s.email, vino ? 'presente' : 'ausente', presi, masDias(fAsa, 0, 18),
             ]);
           });
-          const idAcu = `${PREFIJO}acu_${gid.slice(0, 6)}`;
+          const idAcu = `${PREFIJO}acu_${marcaDe(gid)}`;
           const aFavor = Math.max(1, Math.round(asistentes * 0.85));
           filasAcuerdos.push([
             idAcu, idAsa, gid, 'cambio_reglas', `Confirmar el reglamento del ciclo ${MARCA}`,

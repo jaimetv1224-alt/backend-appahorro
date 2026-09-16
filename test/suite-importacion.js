@@ -582,7 +582,124 @@ module.exports = async function run() {
   const contraPresi = await post('/api/admin/retirar-vinculo',
     { Email: laPresi[0], GroupID: gidPlata }, e.tokens.admin);
   t.status('a la presidencia tampoco', contraPresi, 409);
-  t.eq('y se dice por que', contraPresi.body && contraPresi.body.codigo, 'ES_LA_PRESIDENCIA');
+  t.eq('y se dice por que', contraPresi.body && contraPresi.body.codigo, 'ES_DE_LA_DIRECTIVA');
+
+  // NI A LA TESORERIA NI A LA SECRETARIA. Por ahi se colaba la via corta para
+  // quedarse con un grupo ajeno: la tesorera casi nunca tiene movimiento
+  // PROPIO, asi que el admin podia retirarla, el cargo quedaba vacante, y la
+  // importacion le permitia sentarse el mismo. Desde ahi canManageGroup le daba
+  // verdadero sobre la caja de un grupo que no es suyo.
+  // El grupo de arriba solo trae presidencia, asi que la tesoreria y la
+  // secretaria se cargan aparte: sin ellas el bucle no comprobaba NADA y la
+  // prueba pasaba aunque la proteccion no existiera.
+  await importar([
+    { Username: 'Teso Sin Plata', Email: 'teso@dir.test', Group: 'Con dinero', GroupRole: 'tesorero' },
+    { Username: 'Secre Sin Plata', Email: 'secre@dir.test', Group: 'Con dinero', GroupRole: 'secretario' },
+  ], e.tokens.admin);
+  hoja.invalidarTodo();
+
+  for (const [cargo, correo] of [['tesorero', 'teso@dir.test'], ['secretario', 'secre@dir.test']]) {
+    const fila = filasDe('UserGroupLinks').find((f) => f[0] === correo && f[1] === gidPlata);
+    t.eq(`la ${cargo === 'tesorero' ? 'tesoreria' : 'secretaria'} esta puesta`, fila && fila[3], cargo);
+    const neg = await post('/api/admin/retirar-vinculo', { Email: correo, GroupID: gidPlata }, e.tokens.admin);
+    t.status(`y no se la puede retirar (${cargo})`, neg, 409);
+    t.eq(`por ser de la directiva, no por tener dinero (${cargo})`,
+      neg.body && neg.body.codigo, 'ES_DE_LA_DIRECTIVA');
+    const sigue = filasDe('UserGroupLinks').find((f) => f[0] === correo && f[1] === gidPlata);
+    t.eq(`y sigue activa en el grupo (${cargo})`, (sigue || [])[4], 'activo');
+  }
+
+  // Y la otra mitad: quien administra la plataforma no se sienta en un cargo.
+  const gidLibre = (filasDe('Groups').find((f) => f[1] === 'Con dinero') || [])[0];
+  const sinCargos = 'huerfano-cargos';
+  seedGroup({ id: sinCargos, nombre: 'Sin nadie al mando', presidente: '' });
+  seedLink(e.users.socio2.email, sinCargos, 'member');
+  hoja.invalidarTodo();
+  const intento = await importar([
+    { Username: 'Admin', Email: e.users.admin.email, Group: 'Sin nadie al mando', GroupRole: 'presidente' },
+  ], e.tokens.admin);
+  t.status('la importacion responde', intento, 200);
+  const suRol = filasDe('UserGroupLinks').find((f) => f[0] === e.users.admin.email && f[1] === sinCargos);
+  t.eq('quien administra la plataforma entra como socia, no como presidenta',
+    suRol && suRol[3], 'member');
+  t.check('y se dice por que',
+    (((intento.body || {}).summary || {}).avisos || []).some((x) => x.includes('administra la plataforma')),
+    JSON.stringify(((intento.body || {}).summary || {}).avisos));
+
+  // ===================================================================
+  t.section('IMP 21. "Presidenta" es la presidencia, no una socia rasa');
+  // ===================================================================
+  // La nomina oficial del proyecto escribe "Presidenta" en dos grupos.
+  // 'presidenta' SI estaba en la lista de cargos validos (o sea, pasaba la
+  // validacion) pero NO en el traductor, asi que se degradaba a socia rasa sin
+  // decir nada y el grupo se quedaba sin presidencia para siempre.
+  // 'tesorera' y 'secretaria' si estaban: era una asimetria, no una decision.
+  preparar();
+  e = await baseScenario({ groupId: 'IMP21' });
+  hoja.invalidarTodo();
+  r = await importar([
+    { Username: 'Ana Presidenta', Email: 'ana@cargos.test', Group: 'Cargos en femenino', GroupRole: 'Presidenta' },
+    { Username: 'Bea Tesorera', Email: 'bea@cargos.test', Group: 'Cargos en femenino', GroupRole: 'Tesorera' },
+    { Username: 'Cris Secretaria', Email: 'cris@cargos.test', Group: 'Cargos en femenino', GroupRole: 'Secretaria' },
+    { Username: 'Dora Lideresa', Email: 'dora@cargos.test', Group: 'Cargos en femenino', GroupRole: 'Lideresa' },
+  ], e.tokens.admin);
+  t.status('el archivo entra', r, 200);
+
+  const gidC = (filasDe('Groups').find((f) => f[1] === 'Cargos en femenino') || [])[0];
+  const cargoDe = (correo) => (filasDe('UserGroupLinks')
+    .find((f) => f[0] === correo && f[1] === gidC) || [])[3];
+  t.eq('"Presidenta" preside', cargoDe('ana@cargos.test'), 'presidente');
+  t.eq('"Tesorera" es tesoreria', cargoDe('bea@cargos.test'), 'tesorero');
+  t.eq('"Secretaria" es secretaria', cargoDe('cris@cargos.test'), 'secretario');
+  t.eq('y "Lideresa", que no cabe porque ya hay presidencia, entra como socia',
+    cargoDe('dora@cargos.test'), 'member');
+  t.eq('el grupo queda con su directiva completa',
+    filasDe('UserGroupLinks').filter((f) => f[1] === gidC && f[3] !== 'member').length, 3);
+
+  // ===================================================================
+  t.section('IMP 22. Un texto que PARECE un identificador no inventa un grupo');
+  // ===================================================================
+  // isLikelyGroupIdReference da por identificador cualquier cosa que empiece
+  // por 'grupo_' o diez caracteres hexadecimales. Antes, si ese identificador
+  // no existia, el vinculo se escribia igual apuntando a un grupo fantasma y el
+  // resumen lo contaba como exito: la socia quedaba en una caja que no se ve en
+  // ninguna pantalla.
+  preparar();
+  e = await baseScenario({ groupId: 'IMP22' });
+  hoja.invalidarTodo();
+  r = await importar([
+    { Username: 'Perdida Una', Email: 'p1@fantasma.test', Group: 'grupo_noexiste123', GroupRole: 'member' },
+    { Username: 'Perdida Dos', Email: 'p2@fantasma.test', Group: 'abcdef012345', GroupRole: 'member' },
+  ], e.tokens.admin);
+  const s22 = (r.body && r.body.summary) || {};
+  t.eq('ninguna se vincula a un grupo que no existe', s22.linkedToGroups, 0);
+  t.eq('las dos filas se cuentan como error', s22.failed, 2);
+  t.check('y el error explica que hacer',
+    (s22.errors || []).every((x) => /no existe ningun grupo/i.test(x)), JSON.stringify(s22.errors));
+  t.eq('no quedan vinculos fantasma',
+    filasDe('UserGroupLinks').filter((f) => (f[0] || '').endsWith('@fantasma.test')).length, 0);
+  t.eq('pero las personas si quedaron creadas', s22.createdUsers, 2);
+
+  // ===================================================================
+  t.section('IMP 23. Una fila sin grupo se avisa, no se calla');
+  // ===================================================================
+  // Antes la persona se creaba, se quedaba sin caja y el resumen terminaba con
+  // "errores: 0": nadie se enteraba de que media nomina habia quedado fuera.
+  preparar();
+  e = await baseScenario({ groupId: 'IMP23' });
+  hoja.invalidarTodo();
+  r = await importar([
+    { Username: 'Con Grupo', Email: 'con@sg.test', Group: 'Tiene caja', GroupRole: 'member' },
+    { Username: 'Sin Grupo', Email: 'sin@sg.test', Group: '', GroupRole: 'member' },
+    { Username: 'Sin Grupo Dos', Email: 'sin2@sg.test', Group: '   ', GroupRole: 'member' },
+  ], e.tokens.admin);
+  const s23 = (r.body && r.body.summary) || {};
+  t.eq('se crean las tres personas', s23.createdUsers, 3);
+  t.eq('pero solo una entra en una caja', s23.linkedToGroups, 1);
+  t.eq('y se dice cuantas quedaron sin grupo', s23.sinGrupo, 2);
+  t.check('con su aviso por fila',
+    (s23.avisos || []).filter((x) => /sin caja/i.test(x)).length === 2,
+    JSON.stringify(s23.avisos));
 
   // ===================================================================
   t.section('IMP 9. Una formula del Excel no se ejecuta en la hoja');

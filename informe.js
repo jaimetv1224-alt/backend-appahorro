@@ -62,7 +62,21 @@ module.exports.register = function register(app, ctx) {
     parseMoney, requireAdmin, hojaAccesos, accesoDesdeFila,
   } = ctx;
 
-  /** Lee un rango; si la hoja aun no existe devuelve vacio en vez de reventar. */
+  /** Una pestana que no existe todavia, o que solo tiene cabecera, es vacia. */
+  const hojaSinFilas = (e) => /Unable to parse range|exceeds grid limits|not found/i.test(
+    (e && e.message) || ''
+  );
+
+  /**
+   * Lee un rango. Si la pestana no existe todavia devuelve vacio; pero si el
+   * fallo es de CUOTA, el error SUBE.
+   *
+   * Antes se devolvia vacio ante cualquier error, y con la cuota de Google
+   * agotada el informe del proyecto salia entero de ceros con HTTP 200 y
+   * success:true: cero ahorros, cero prestamos, cero asambleas. Indistinguible
+   * de un informe verdadero de un proyecto que no ha arrancado. Ese informe es
+   * el que se entrega al INCYT.
+   */
   async function leer(sheetsClient, rango) {
     try {
       const r = await sheetsClient.spreadsheets.values.get({
@@ -70,7 +84,8 @@ module.exports.register = function register(app, ctx) {
       });
       return r.data.values || [];
     } catch (e) {
-      return [];
+      if (hojaSinFilas(e)) return [];
+      throw e;
     }
   }
 
@@ -115,6 +130,8 @@ module.exports.register = function register(app, ctx) {
         return rangos.map((r) => porRango.get(r) || []);
       } catch (e2) {
         // Ni asi: se cae a leerlas una por una, que es lo que se hacia antes.
+        // Si el motivo era la cuota, `leer` lo hara subir y el endpoint
+        // respondera 429 con reintento, que es la verdad.
         return Promise.all(rangos.map((rango) => leer(sheetsClient, rango)));
       }
     }
@@ -878,6 +895,21 @@ module.exports.register = function register(app, ctx) {
       // =================================================================
       // HOJA: Resumen
       // =================================================================
+      // CUANTO DE ESTO ES DEMOSTRACION. Lo sembrado por /api/admin/demo/sembrar
+      // lleva el identificador con prefijo 'demo_', pero ningun lector lo
+      // miraba: los totales del informe podian ser inventados al 100 % sin que
+      // nada lo dijera, y este es el informe que se entrega al INCYT.
+      const esSembrado = (v) => (v || '').toString().trim().toLowerCase().startsWith('demo_');
+      const sembrado = {
+        aportes: ahorros.filter((f) => esSembrado(f[SAV.movId])).length,
+        acciones: acciones.filter((f) => esSembrado(f[ACC.movId])).length,
+        prestamos: prestamos.filter((f) => esSembrado(f[LOAN.id])).length,
+        pagos: pagos.filter((f) => esSembrado(f[PAGO.id])).length,
+        asambleas: asambleas.filter((f) => esSembrado(f[ASA.id])).length,
+        entradas: accesos.filter((f) => (f[7] || '').toString().trim().toLowerCase() === 'demo').length,
+      };
+      sembrado.hayDatosDeDemostracion = Object.values(sembrado).some((n) => n > 0);
+
       const totalPersonas = Object.keys(persona).length;
       const sinGrupo = Object.values(persona).filter((p) => p.grupos.length === 0).length;
       const handEntrado = Object.values(persona).filter((p) => (entradasDe[p.email] || []).length > 0).length;
@@ -889,6 +921,13 @@ module.exports.register = function register(app, ctx) {
         { Concepto: 'Personas que han entrado alguna vez', Valor: handEntrado },
         { Concepto: 'Personas que nunca han entrado', Valor: totalPersonas - handEntrado },
         { Concepto: 'Entradas registradas', Valor: todos.length },
+        ...(sembrado.hayDatosDeDemostracion ? [{
+          Concepto: 'AVISO: parte de estas cifras son datos de demostracion',
+          Valor: `${sembrado.aportes} aportes, ${sembrado.acciones} compras, `
+               + `${sembrado.prestamos} prestamos, ${sembrado.pagos} pagos, `
+               + `${sembrado.asambleas} asambleas y ${sembrado.entradas} entradas. `
+               + 'Se borran con /api/admin/demo/limpiar.',
+        }] : []),
         { Concepto: 'Cargos de directiva cubiertos', Valor: filasDirectiva.length },
         {
           Concepto: 'Grupos con la directiva completa',

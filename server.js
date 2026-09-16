@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.16-informe-sin-duplicados';
+const BACKEND_VERSION = '2026.09.16-auditoria-1';
 
 let gobApi = null;
 
@@ -1719,7 +1719,13 @@ const normalizeGlobalRole = (value) => {
 
 const normalizeGroupRole = (value) => {
     const role = normalizeLooseToken(value);
-    if (['presidente', 'lider', 'leader', 'groupleader'].includes(role)) return 'presidente';
+    // 'presidenta' estaba en SINONIMOS_ROL_GRUPO (o sea, se aceptaba como cargo
+    // valido) pero NO aqui, asi que pasaba la validacion y luego se degradaba a
+    // socia rasa sin decir nada. La nomina oficial del proyecto escribe
+    // "Presidenta" en dos grupos: esas dos mujeres entraban como socias y su
+    // grupo se quedaba sin presidencia. 'tesorera' y 'secretaria' si estaban.
+    if (['presidente', 'presidenta', 'lider', 'lideresa', 'leader', 'groupleader', 'president']
+        .includes(role)) return 'presidente';
     if (['tesorero', 'tesorera', 'treasurer'].includes(role)) return 'tesorero';
     if (['secretario', 'secretaria', 'secretary'].includes(role)) return 'secretario';
     if (['member', 'miembro', 'miembros', 'socio', 'socios'].includes(role)) return 'member';
@@ -1731,7 +1737,7 @@ const normalizeGroupRole = (value) => {
 // la persona terminara entrando como socio raso).
 const SINONIMOS_ROL_GRUPO = new Set([
     'member', 'miembro', 'miembros', 'socio', 'socios',
-    'presidente', 'presidenta', 'lider', 'leader', 'groupleader',
+    'presidente', 'presidenta', 'lider', 'lideresa', 'leader', 'groupleader', 'president',
     'tesorero', 'tesorera', 'treasurer',
     'secretario', 'secretaria', 'secretary',
 ]);
@@ -1957,7 +1963,13 @@ async function getGroupMonthlyRate(groupId) {
         const row = rows.find((r) => (r[0] || '').toString().trim() === gid);
         return row ? parseMoney(row[16]) : 0;
     } catch (e) {
-        return 0;
+        // NO se devuelve 0. Un 0 aqui no es "el grupo presta sin interes": es
+        // "no se pudo leer". Devolverlo hacia que un 429 de cuota aprobara el
+        // credito al 0 % con HTTP 200, y el grupo perdia todos los intereses de
+        // ese prestamo sin que nada lo avisara. Que suba: quien llama ya sabe
+        // responder 429 con reintento.
+        e.motivo = e.motivo || 'cuota_hoja';
+        throw e;
     }
 }
 
@@ -4196,6 +4208,14 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
             .map((row) => normalizeImportEmail(row[1]))
             .filter(Boolean)
     );
+    // Quien administra la plataforma no ocupa cargos de grupo. Sale de la misma
+    // lectura de Users, sin coste extra.
+    const adminsDePlataforma = new Set(
+        (existingRows || [])
+            .filter((row) => normalizeGlobalRole(row[3]) === 'admin')
+            .map((row) => normalizeImportEmail(row[1]))
+            .filter(Boolean)
+    );
     const groupsLookup = linkGroups ? await buildGroupsLookup() : null;
 
     // Vinculos ya escritos. El mismo recorrido sirve para dos cosas: no repetir
@@ -4302,7 +4322,17 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
         if (!linkGroups) continue;
 
         const groupReference = normalizeImportCell(pickFirstValue(row, ['GroupID', 'groupId', 'Group', 'group', 'Grupo', 'grupo', 'GroupName', 'groupName', 'NombreGrupo']));
-        if (!groupReference) continue;
+        if (!groupReference) {
+            // La persona se crea pero se queda sin grupo, y eso hay que decirlo:
+            // antes el resumen terminaba con "errores: 0" y nadie se enteraba de
+            // que media nomina se habia quedado fuera de su caja.
+            summary.sinGrupo = (summary.sinGrupo || 0) + 1;
+            summary.avisos.push(
+                `Fila ${rowNumber}: ${email} no trae grupo en la columna Group, asi que queda `
+                + 'con cuenta pero sin caja. Rellena esa columna y vuelve a subir el archivo.'
+            );
+            continue;
+        }
 
         let resolvedGroupId = resolveImportGroupId(groupReference, groupsLookup, summary.avisos);
         const groupRefLooksLikeId = isLikelyGroupIdReference(groupReference);
@@ -4336,13 +4366,21 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
             }
         }
 
-        if (!resolvedGroupId && !groupRefLooksLikeId) {
+        // Un texto que PARECE un identificador pero que no esta en la hoja no
+        // puede dar por bueno el vinculo: antes se escribia el vinculo apuntando
+        // a un grupo inexistente y el resumen lo contaba como exito, asi que la
+        // socia quedaba en un grupo fantasma que no se ve en ninguna pantalla.
+        if (!resolvedGroupId) {
             summary.failed += 1;
-            summary.errors.push(`Fila ${rowNumber}: no se encontró el grupo "${groupReference}" en la hoja Groups.`);
+            summary.errors.push(
+                `Fila ${rowNumber}: no existe ningun grupo "${groupReference}" en la hoja Groups. `
+                + 'Si es un grupo nuevo, escribe su NOMBRE en la columna Group; si querias uno que '
+                + 'ya existe, copia su nombre tal cual.'
+            );
             continue;
         }
 
-        const groupId = normalizeGroupKey(resolvedGroupId || groupReference);
+        const groupId = normalizeGroupKey(resolvedGroupId);
         const groupRole = normalizeGroupRole(pickFirstValue(row, ['GroupRole', 'groupRole', 'RolGrupo', 'rolGrupo', 'Rol Grupo', 'Rol']));
         const joinDate = normalizeImportCell(pickFirstValue(row, ['JoinDate', 'joinDate', 'FechaIngreso', 'fechaIngreso'])) || new Date().toISOString();
 
@@ -4360,7 +4398,13 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
             // Esto lo desatasca por el unico sitio por donde entra la nomina,
             // y SOLO para rellenar un puesto VACANTE. Jamas releva a quien ya
             // ocupa el cargo: eso sigue siendo cosa del propio grupo.
+            // Y nunca se sienta en un cargo a una cuenta de administrador de la
+            // plataforma: seria la otra mitad de la via corta para quedarse con
+            // un grupo ajeno. Que alguien administre la plataforma no le da
+            // ningun derecho sobre la caja de un grupo.
+            const esAdminDePlataforma = adminsDePlataforma.has(email);
             if (CARGOS_DIRECTIVA.has(groupRole)
+                && !esAdminDePlataforma
                 && rolDeVinculo.get(clave) === 'member'
                 && cargoLibre(groupId, groupRole)
                 && filaDeVinculo.has(clave)) {
@@ -4391,6 +4435,13 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
         // seis "Lider" creaba seis presidentas en el mismo grupo, que es
         // exactamente lo que hay hoy en "Banquio de ahorros".
         let rolFinal = groupRole;
+        if (CARGOS_DIRECTIVA.has(rolFinal) && adminsDePlataforma.has(email)) {
+            rolFinal = 'member';
+            summary.avisos.push(
+                `Fila ${rowNumber}: ${email} administra la plataforma, asi que entra como socia. `
+                + 'Los cargos del grupo los ocupan sus socias, no quien administra la aplicacion.'
+            );
+        }
         if (CARGOS_DIRECTIVA.has(rolFinal) && !cargoLibre(groupId, rolFinal)) {
             rolFinal = 'member';
             summary.cargosDegradados += 1;
@@ -4435,10 +4486,30 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
     if (ascensos.length) {
         try {
             const sheetsClient = await getSheetsClient();
+            // SE VUELVE A LEER ANTES DE ESCRIBIR. El numero de fila se anoto al
+            // principio de la importacion, y entre medias otra peticion puede
+            // haber BORRADO filas de esta hoja (desvincular-usuario-grupo borra
+            // la fila de verdad y corre todas las de abajo). Escribir a ciegas
+            // en esa posicion coronaba a quien nadie habia nombrado. El cerrojo
+            // de la importacion es sobre Users, no sobre esta hoja.
+            const frescas = (await sheetsClient.spreadsheets.values.get({
+                spreadsheetId: SPREADSHEET_ID, range: 'UserGroupLinks!A2:F',
+            })).data.values || [];
             for (const a of ascensos) {
+                const i = frescas.findIndex((f) => (
+                    normalize(f[0]) === a.email && normalizeGroupKey(f[1]) === a.groupId
+                ));
+                if (i === -1) {
+                    summary.avisos.push(
+                        `No se pudo asignar el cargo de ${a.rol} a ${a.email}: su vinculo con el `
+                        + 'grupo ya no esta donde estaba. Vuelve a subir el mismo archivo.'
+                    );
+                    summary.cargosAsignados = Math.max(0, summary.cargosAsignados - 1);
+                    continue;
+                }
                 await sheetsClient.spreadsheets.values.update({
                     spreadsheetId: SPREADSHEET_ID,
-                    range: `UserGroupLinks!D${a.fila}`,
+                    range: `UserGroupLinks!D${i + 2}`,
                     valueInputOption: 'RAW',
                     resource: { values: [[a.rol]] },
                 });
@@ -4885,11 +4956,22 @@ app.post('/api/admin/retirar-vinculo', requireAdmin, bloquear(() => 'hoja:UserGr
         if (!linkIsActive(rows[idx])) {
             return res.json({ success: true, yaEstaba: true, message: 'Ya estaba retirada de ese grupo.' });
         }
-        if (normalizeGroupRole(rows[idx][3]) === 'presidente') {
+        // NO SE RETIRA A NADIE DE LA DIRECTIVA, ni a la presidencia ni a la
+        // tesoreria ni a la secretaria. Antes solo estaba protegida la
+        // presidencia, y por ahi se colaba la via corta para quedarse con un
+        // grupo ajeno: la tesorera casi nunca tiene movimiento PROPIO, asi que
+        // el administrador podia retirarla, el cargo quedaba vacante, y la
+        // importacion (que rellena cargos vacantes) le permitia sentarse el
+        // mismo con una nomina de dos lineas. Desde ahi canManageGroup le daba
+        // verdadero y pasaba todos los assertGroupManager.
+        const cargoActual = normalizeGroupRole(rows[idx][3]);
+        if (CARGOS_DIRECTIVA.has(cargoActual)) {
             return res.status(409).json({
                 success: false,
-                codigo: 'ES_LA_PRESIDENCIA',
-                message: 'No se retira a quien preside el grupo: primero el grupo tiene que pasar la presidencia a otra persona.',
+                codigo: 'ES_DE_LA_DIRECTIVA',
+                cargo: cargoActual,
+                message: `No se retira a quien ocupa un cargo en el grupo (aqui, ${cargoActual}). `
+                       + 'Eso lo decide el propio grupo pasando el cargo a otra persona.',
             });
         }
 
