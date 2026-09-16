@@ -398,7 +398,12 @@ module.exports.register = function register(app, ctx) {
           const cuantas = 1 + Math.floor(azar() * 14);
           const constante = azar() < 0.55;              // si sigue entrando hasta hoy
           const diasDeVida = Math.round((hoy - new Date(`${anioIni}-${dosDigitos(mesIni)}-01T00:00:00Z`)) / 86400000);
-          const ventana = constante ? diasDeVida : Math.round(diasDeVida * (0.3 + azar() * 0.4));
+          // Cada persona deja de entrar en un momento distinto. Si todas las
+          // constantes entraran ayer, "activas en 7 dias" y "activas en 30"
+          // darian el MISMO numero y la retencion saldria identica en ambos
+          // plazos: se nota a la legua que el dato esta puesto a mano.
+          const hasta = constante ? (0.82 + azar() * 0.18) : (0.28 + azar() * 0.45);
+          const ventana = Math.round(diasDeVida * hasta);
           for (let k = 0; k < cuantas; k += 1) {
             const dia = Math.min(diasDeVida - 1, primera + Math.floor((ventana - primera) * (k / Math.max(1, cuantas - 1))));
             if (dia < 0) continue;

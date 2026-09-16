@@ -346,6 +346,19 @@ module.exports = async function run() {
   t.check('y ninguna en el futuro',
     entradas.every((f) => new Date(f[0]) <= new Date()), '');
 
+  // Si todas dejaran de entrar el mismo dia, "activas a 7 dias" y "a 30"
+  // darian lo mismo y se notaria que el dato esta puesto a mano.
+  const ultimaDe = new Map();
+  entradas.forEach((f) => {
+    const t2 = new Date(f[0]).getTime();
+    if (!ultimaDe.has(f[1]) || t2 > ultimaDe.get(f[1])) ultimaDe.set(f[1], t2);
+  });
+  const ahora = Date.now();
+  const dentroDe = (dias) => [...ultimaDe.values()].filter((x) => (ahora - x) / 86400000 <= dias).length;
+  t.check('unas siguen entrando y otras lo dejaron hace meses',
+    dentroDe(7) < dentroDe(60),
+    `activas 7 dias: ${dentroDe(7)} | 60 dias: ${dentroDe(60)} | total ${ultimaDe.size}`);
+
   // ===================================================================
   t.section('DEM 14. La app no puede salir mas lenta que el cuaderno');
   // ===================================================================
