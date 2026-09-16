@@ -346,6 +346,129 @@ module.exports = async function run() {
     !!creado && creado.seLlama === 'Grupo que no existe', JSON.stringify(creado));
 
   // ===================================================================
+  t.section('IMP 13. Un grupo que quedo SIN directiva puede recuperarse');
+  // ===================================================================
+  // Paso de verdad: una carga a medias dejo a las 29 socias de un grupo como
+  // miembros rasos. El administrador de la plataforma NO puede nombrar
+  // directiva (es deliberado) y una socia rasa tampoco, asi que el grupo
+  // quedaba muerto: nadie en el mundo podia nombrar presidenta.
+  preparar();
+  e = await baseScenario({ groupId: 'IMD' });
+  hoja.invalidarTodo();
+  // Primera carga, sin cargos: todas entran como socias.
+  await importar(nominaDe(4, 'Sin directiva', 'huerf').map((f) => ({ ...f, GroupRole: 'member' })),
+    e.tokens.admin);
+  const gidHuerfano = (filasDe('Groups').find((f) => f[1] === 'Sin directiva') || [])[0];
+  t.eq('quedan cuatro socias y ningun cargo',
+    filasDe('UserGroupLinks').filter((f) => f[1] === gidHuerfano && f[3] !== 'member').length, 0);
+
+  // Se vuelve a subir la MISMA nomina, ahora con los cargos puestos.
+  hoja.invalidarTodo();
+  r = await importar(nominaDe(4, 'Sin directiva', 'huerf'), e.tokens.admin);
+  const s13 = (r.body && r.body.summary) || {};
+  t.status('la reimportacion responde', r, 200);
+  t.eq('no crea a nadie de nuevo', s13.createdUsers, 0);
+  t.eq('y asigna el cargo que faltaba', s13.cargosAsignados, 1);
+  const presiRec = filasDe('UserGroupLinks')
+    .find((f) => f[1] === gidHuerfano && f[3] === 'presidente');
+  t.check('la presidencia quedo escrita en la hoja', !!presiRec,
+    JSON.stringify(filasDe('UserGroupLinks').filter((f) => f[1] === gidHuerfano).map((f) => f[0] + ':' + f[3])));
+  t.eq('y es la primera de la lista, la que dice el archivo',
+    presiRec && presiRec[0], 'huerf1@aguinaldo.test');
+
+  // ===================================================================
+  t.section('IMP 14. Nunca se releva a quien YA ocupa el cargo');
+  // ===================================================================
+  // Es el limite que no se cruza: el admin puede rellenar un puesto vacio,
+  // nunca quitarle la presidencia a quien la tiene. Si se pudiera, subir un
+  // Excel seria la via corta para quedarse con la caja de un grupo ajeno.
+  preparar();
+  e = await baseScenario({ groupId: 'IME' });
+  hoja.invalidarTodo();
+  // El grupo base ya tiene presidenta, tesorero y secretaria de verdad.
+  const antesPresi = filasDe('UserGroupLinks')
+    .find((f) => f[1] === 'IME' && f[3] === 'presidente')[0];
+
+  r = await importar([
+    { Username: 'Asaltante', Email: 'asalto@juntago.test', Group: 'Banco Comunal Salinas', GroupRole: 'presidente' },
+    { Username: 'Socia Dani', Email: e.users.socio1.email, Group: 'Banco Comunal Salinas', GroupRole: 'presidente' },
+  ], e.tokens.admin);
+  const s14 = (r.body && r.body.summary) || {};
+
+  const presiAhora = filasDe('UserGroupLinks')
+    .find((f) => f[1] === 'IME' && f[3] === 'presidente')[0];
+  t.eq('la presidenta sigue siendo la misma', presiAhora, antesPresi);
+  t.eq('solo hay UNA presidencia en el grupo',
+    filasDe('UserGroupLinks').filter((f) => f[1] === 'IME' && f[3] === 'presidente').length, 1);
+  t.eq('no se ascendio a nadie', s14.cargosAsignados, 0);
+  t.eq('a quien venia como presidente se le baja a socia', s14.cargosDegradados, 1);
+  const elNuevo = filasDe('UserGroupLinks').find((f) => f[0] === 'asalto@juntago.test');
+  t.eq('y entra como socia rasa, no como presidenta', elNuevo && elNuevo[3], 'member');
+  t.check('con un aviso que lo explica',
+    (s14.avisos || []).some((x) => x.includes('ya esta ocupado')), JSON.stringify(s14.avisos));
+  const socia1 = filasDe('UserGroupLinks').find((f) => f[0] === e.users.socio1.email && f[1] === 'IME');
+  t.eq('y a la socia que ya estaba no se le cambia el cargo', socia1 && socia1[3], 'member');
+
+  // ===================================================================
+  t.section('IMP 15. Seis "Lider" en la nomina no son seis presidentas');
+  // ===================================================================
+  // Es lo que paso de verdad con "Banquio de ahorros": la nomina traia seis
+  // Lider y la app los tradujo a seis presidentes en el mismo grupo.
+  preparar();
+  e = await baseScenario({ groupId: 'IMF' });
+  hoja.invalidarTodo();
+  r = await importar(Array.from({ length: 6 }, (_, i) => ({
+    Username: `Lider ${i + 1}`, Email: `lider${i + 1}@seis.test`, Group: 'Seis lideres', GroupRole: 'Lider',
+  })), e.tokens.admin);
+  const s15 = (r.body && r.body.summary) || {};
+  const gidSeis = (filasDe('Groups').find((f) => f[1] === 'Seis lideres') || [])[0];
+  t.eq('entran las seis', s15.linkedToGroups, 6);
+  t.eq('pero solo una preside',
+    filasDe('UserGroupLinks').filter((f) => f[1] === gidSeis && f[3] === 'presidente').length, 1);
+  t.eq('las otras cinco quedan como socias', s15.cargosDegradados, 5);
+  t.eq('y preside la primera de la lista',
+    filasDe('UserGroupLinks').find((f) => f[1] === gidSeis && f[3] === 'presidente')[0],
+    'lider1@seis.test');
+
+  // ===================================================================
+  t.section('IMP 16. Un CSV con acentos no destroza los nombres');
+  // ===================================================================
+  // Multer guarda el archivo SIN extension, y la libreria de hojas lee un CSV
+  // como Latin-1 salvo que traiga BOM: "Villon" con tilde entraba con el
+  // nombre roto y se quedaba asi en la ficha de una persona real. Paso de
+  // verdad con ocho socias de Family Bank.
+  preparar();
+  e = await baseScenario({ groupId: 'IMG' });
+  hoja.invalidarTodo();
+
+  const FIN = String.fromCharCode(13, 10);
+  const csv = [
+    'Username,Email,Group,GroupRole',
+    '"Tanya Villón","tanya@acentos.test","Con acentos","presidente"',
+    '"Doménica Hernández","dome@acentos.test","Con acentos","member"',
+    '"Mathias Muñoz","mathias@acentos.test","Con acentos","member"',
+  ].join(FIN) + FIN;
+
+  r = await postArchivo('/api/importar-usuarios-grupos', {},
+    { campo: 'file', nombre: 'acentos.csv', contenido: Buffer.from(csv, 'utf8'), tipo: 'text/csv' },
+    e.tokens.admin);
+  t.status('el CSV entra', r, 200);
+
+  const conAcento = filasDe('Users').filter((f) => (f[1] || '').endsWith('@acentos.test'));
+  t.eq('entraron las tres', conAcento.length, 3);
+  t.eq('con la o acentuada intacta',
+    (conAcento.find((f) => f[1] === 'tanya@acentos.test') || [])[0], 'Tanya Villón');
+  t.eq('con la e y la a acentuadas intactas',
+    (conAcento.find((f) => f[1] === 'dome@acentos.test') || [])[0], 'Doménica Hernández');
+  t.eq('y con la enie intacta',
+    (conAcento.find((f) => f[1] === 'mathias@acentos.test') || [])[0], 'Mathias Muñoz');
+
+  const MARCA = String.fromCharCode(195); // la A con tilde que aparece al leer UTF-8 como Latin-1
+  t.check('ninguna con la marca de acentos rotos',
+    !conAcento.some((f) => (f[0] || '').indexOf(MARCA) !== -1),
+    JSON.stringify(conAcento.map((f) => f[0])));
+
+  // ===================================================================
   t.section('IMP 9. Una formula del Excel no se ejecuta en la hoja');
   // ===================================================================
   preparar();

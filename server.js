@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.16-importacion-destinos';
+const BACKEND_VERSION = '2026.09.16-directiva-vacante';
 
 let gobApi = null;
 
@@ -1708,6 +1708,8 @@ const normalizeLooseToken = (value) => normalize(value).normalize('NFD').replace
 const VALID_GLOBAL_ROLES = new Set(['admin', 'member']);
 const VALID_GROUP_ROLES = new Set(['member', 'presidente', 'tesorero', 'secretario']);
 const GROUP_ADMIN_ROLES = new Set(['presidente', 'tesorero']);
+// Los tres puestos de los que solo cabe UNA persona por grupo.
+const CARGOS_DIRECTIVA = new Set(['presidente', 'tesorero', 'secretario']);
 
 const normalizeGlobalRole = (value) => {
     const role = normalizeLooseToken(value);
@@ -3975,7 +3977,11 @@ const normalizeImportLookupKey = (value) => (
 );
 
 const readExcelRows = (filePath) => {
-    const workbook = xlsx.readFile(filePath);
+    // codepage 65001 = UTF-8. Multer guarda el archivo SIN extension, y sin
+    // esto la libreria lee un CSV como Latin-1: "Villon" entraba como "VillÃ³n"
+    // y quedaba asi, con el nombre roto, en la ficha de una persona real.
+    // En un .xlsx no cambia nada (ese formato ya es UTF-8 por dentro).
+    const workbook = xlsx.readFile(filePath, { codepage: 65001 });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     return xlsx.utils.sheet_to_json(sheet, { defval: '' });
 };
@@ -4154,8 +4160,11 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
         linkedToGroups: 0,
         existingLinks: 0,
         defaultedPasswords: 0,
+        cargosAsignados: 0,
+        cargosDegradados: 0,
         failed: 0,
         errors: [],
+        avisos: [],
     };
 
     // ---------------------------------------------------------------- PASO 1
@@ -4174,19 +4183,43 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
     // hacia el alta de una en una) pero no ocupa cupo.
     const vinculos = new Set();
     const dentroPorGrupo = new Map();
+    // Donde vive cada vinculo y que cargo tiene hoy, para poder rellenar una
+    // directiva vacia sin tocar a quien ya ocupa un puesto.
+    const filaDeVinculo = new Map();
+    const rolDeVinculo = new Map();
+    const cargosTomados = new Map();
     if (linkGroups) {
         const sheetsClient = await getSheetsClient();
         const enlacesResp = await sheetsClient.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
             range: 'UserGroupLinks!A2:F',
         });
-        (enlacesResp.data.values || []).forEach((fila) => {
+        (enlacesResp.data.values || []).forEach((fila, i) => {
             const gid = normalizeGroupKey(fila[1]);
             if (!gid) return;
-            vinculos.add(`${normalize(fila[0])}|${gid}`);
-            if (linkIsActive(fila)) dentroPorGrupo.set(gid, (dentroPorGrupo.get(gid) || 0) + 1);
+            const clave = `${normalize(fila[0])}|${gid}`;
+            vinculos.add(clave);
+            // +2 porque el rango empieza en A2 y la fila 1 es la cabecera.
+            filaDeVinculo.set(clave, i + 2);
+            const rolHoy = normalizeGroupRole(fila[3]);
+            rolDeVinculo.set(clave, rolHoy);
+            if (linkIsActive(fila)) {
+                dentroPorGrupo.set(gid, (dentroPorGrupo.get(gid) || 0) + 1);
+                if (CARGOS_DIRECTIVA.has(rolHoy)) {
+                    if (!cargosTomados.has(gid)) cargosTomados.set(gid, new Set());
+                    cargosTomados.get(gid).add(rolHoy);
+                }
+            }
         });
     }
+
+    /** Apunta que el cargo queda ocupado en ese grupo. */
+    const ocupar = (gid, cargo) => {
+        if (!CARGOS_DIRECTIVA.has(cargo)) return;
+        if (!cargosTomados.has(gid)) cargosTomados.set(gid, new Set());
+        cargosTomados.get(gid).add(cargo);
+    };
+    const cargoLibre = (gid, cargo) => !(cargosTomados.get(gid) || new Set()).has(cargo);
 
     // ---------------------------------------------------------------- PASO 2
     // Se arma todo en memoria. Aqui no se escribe nada, salvo los grupos que
@@ -4194,6 +4227,7 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
     // poder vincular a nadie.
     const filasUsuarios = [];
     const filasVinculos = [];
+    const ascensos = [];
     // A donde fue a parar cada socia. El resolvedor de grupos acepta nombres
     // PARECIDOS (82% de similitud), asi que subir "Mi aguinaldo" podria meter a
     // las 52 en otro grupo de nombre parecido sin que nadie se entere. Esto lo
@@ -4294,6 +4328,26 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
         const clave = `${email}|${groupId}`;
         if (vinculos.has(clave)) {
             summary.existingLinks += 1;
+
+            // UN GRUPO SIN DIRECTIVA NO PODIA RECUPERARSE NUNCA. El administrador
+            // de la plataforma NO puede nombrar directiva (es deliberado: ser
+            // dueno de la plataforma no es ser dueno de la caja de nadie), y una
+            // socia rasa tampoco puede. Si una carga a medias dejaba a las 29
+            // socias como miembros rasos, el grupo quedaba muerto: nadie en el
+            // mundo podia nombrar a la presidenta.
+            //
+            // Esto lo desatasca por el unico sitio por donde entra la nomina,
+            // y SOLO para rellenar un puesto VACANTE. Jamas releva a quien ya
+            // ocupa el cargo: eso sigue siendo cosa del propio grupo.
+            if (CARGOS_DIRECTIVA.has(groupRole)
+                && rolDeVinculo.get(clave) === 'member'
+                && cargoLibre(groupId, groupRole)
+                && filaDeVinculo.has(clave)) {
+                ascensos.push({ fila: filaDeVinculo.get(clave), rol: groupRole, email, groupId });
+                rolDeVinculo.set(clave, groupRole);
+                ocupar(groupId, groupRole);
+                summary.cargosAsignados += 1;
+            }
             continue;
         }
 
@@ -4312,9 +4366,25 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
             continue;
         }
 
+        // Solo cabe una persona en cada cargo. Sin esto, una nomina que trae
+        // seis "Lider" creaba seis presidentas en el mismo grupo, que es
+        // exactamente lo que hay hoy en "Banquio de ahorros".
+        let rolFinal = groupRole;
+        if (CARGOS_DIRECTIVA.has(rolFinal) && !cargoLibre(groupId, rolFinal)) {
+            rolFinal = 'member';
+            summary.cargosDegradados += 1;
+            summary.avisos.push(
+                `Fila ${rowNumber}: ${email} venia como ${groupRole}, pero ese cargo ya esta `
+                + 'ocupado en el grupo, asi que entra como socia. Solo cabe una persona por cargo.'
+            );
+        }
+
         vinculos.add(clave);
         dentroPorGrupo.set(groupId, dentro + 1);
-        filasVinculos.push([email, groupId, sanitizeCell(joinDate), groupRole, 'activo', 'self']);
+        filaDeVinculo.set(clave, null);
+        rolDeVinculo.set(clave, rolFinal);
+        ocupar(groupId, rolFinal);
+        filasVinculos.push([email, groupId, sanitizeCell(joinDate), rolFinal, 'activo', 'self']);
         summary.linkedToGroups += 1;
 
         if (!destinos.has(groupId)) {
@@ -4337,6 +4407,28 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
     // vinculos.
     if (filasUsuarios.length) {
         await usersService.crearUsuariosEnLote(filasUsuarios);
+    }
+
+    // Los ascensos son celdas sueltas de una columna, no filas nuevas: como
+    // mucho tres por grupo, asi que no hace falta agruparlas.
+    if (ascensos.length) {
+        try {
+            const sheetsClient = await getSheetsClient();
+            for (const a of ascensos) {
+                await sheetsClient.spreadsheets.values.update({
+                    spreadsheetId: SPREADSHEET_ID,
+                    range: `UserGroupLinks!D${a.fila}`,
+                    valueInputOption: 'RAW',
+                    resource: { values: [[a.rol]] },
+                });
+            }
+        } catch (error) {
+            summary.cargosAsignados = 0;
+            summary.avisos.push(
+                `No se pudieron asignar los cargos de la directiva (${error.message}). `
+                + 'Las socias si quedaron en su grupo; vuelve a subir el mismo archivo.'
+            );
+        }
     }
 
     if (filasVinculos.length) {
