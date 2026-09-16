@@ -702,6 +702,54 @@ module.exports = async function run() {
     JSON.stringify(s23.avisos));
 
   // ===================================================================
+  t.section('IMP 24. Dos grupos con el mismo nombre no se resuelven a ciegas');
+  // ===================================================================
+  // Antes el buscador se quedaba con el ULTIMO de la hoja, asi que la nomina
+  // entera caia en el que estuviera mas abajo, en silencio y sin forma de
+  // saberlo.
+  preparar();
+  e = await baseScenario({ groupId: 'IMP24' });
+  seedUser({ nombre: 'Uno', email: 'u1@homonimo.test' });
+  seedUser({ nombre: 'Dos', email: 'u2@homonimo.test' });
+  seedGroup({ id: 'HOM-A', nombre: 'Manos Unidas', presidente: 'u1@homonimo.test' });
+  seedGroup({ id: 'HOM-B', nombre: 'Manos Unidas', presidente: 'u2@homonimo.test' });
+  seedLink('u1@homonimo.test', 'HOM-A', 'presidente');
+  seedLink('u2@homonimo.test', 'HOM-B', 'presidente');
+  hoja.invalidarTodo();
+
+  r = await importar(nominaDe(3, 'Manos Unidas', 'hom'), e.tokens.admin);
+  const s24 = (r.body && r.body.summary) || {};
+  t.eq('no se vincula a nadie a ciegas', s24.linkedToGroups, 0);
+  t.eq('las tres filas se cuentan como error', s24.failed, 3);
+  t.check('y se dice que hay dos grupos con ese nombre',
+    (s24.errors || []).some((x) => /mas de un grupo/i.test(x)), JSON.stringify(s24.errors));
+  t.eq('y NO se crea un tercer grupo con el mismo nombre',
+    filasDe('Groups').filter((f) => f[1] === 'Manos Unidas').length, 2);
+  t.eq('ninguno de los dos grupos crece',
+    filasDe('UserGroupLinks').filter((f) => f[1] === 'HOM-A' || f[1] === 'HOM-B').length, 2);
+
+  // ===================================================================
+  t.section('IMP 25. La cifra del final separa dos grupos parecidos');
+  // ===================================================================
+  // "Mi aguinaldo 1" y "Mi aguinaldo 2" se parecen en un 92 %, pero la cifra
+  // del final es justo lo que los distingue: fundirlos mete a media nomina en
+  // la caja del grupo vecino.
+  preparar();
+  e = await baseScenario({ groupId: 'IMP25' });
+  seedUser({ nombre: 'Tres', email: 'u3@cifra.test' });
+  seedGroup({ id: 'CIF-1', nombre: 'Mi aguinaldo 1', presidente: 'u3@cifra.test' });
+  seedLink('u3@cifra.test', 'CIF-1', 'presidente');
+  hoja.invalidarTodo();
+
+  r = await importar(nominaDe(2, 'Mi aguinaldo 2', 'cif'), e.tokens.admin);
+  const s25 = (r.body && r.body.summary) || {};
+  t.eq('se crea el grupo 2, no se mete en el 1', s25.createdGroups, 1);
+  t.eq('el grupo 1 se queda como estaba',
+    filasDe('UserGroupLinks').filter((f) => f[1] === 'CIF-1').length, 1);
+  const destino25 = (s25.grupos || [])[0] || {};
+  t.eq('y el destino se llama como dice el Excel', destino25.seLlama, 'Mi aguinaldo 2');
+
+  // ===================================================================
   t.section('IMP 9. Una formula del Excel no se ejecuta en la hoja');
   // ===================================================================
   preparar();

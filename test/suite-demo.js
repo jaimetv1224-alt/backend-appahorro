@@ -346,11 +346,24 @@ module.exports = async function run() {
   t.check('de varias personas distintas',
     new Set(entradas.map((f) => f[1])).size > 1,
     `${new Set(entradas.map((f) => f[1])).size} personas`);
-  t.check('pero NO de todas: quien nunca entro tambien es un dato',
-    new Set(entradas.map((f) => f[1])).size
-      < filasDe('UserGroupLinks').filter((f) => f[1] === 'DMD').length + 5, '');
-  t.check('desde varios aparatos',
-    new Set(entradas.map((f) => f[2])).size >= 1, JSON.stringify([...new Set(entradas.map((f) => f[2]))]));
+  // La cota de antes (+5) era inalcanzable: pasaba aunque entrara todo el
+  // mundo. Se compara contra las socias del grupo, que es lo que se queria.
+  // Se mide sobre TODA la plataforma, no sobre un grupo: con cinco socias el
+  // sorteo puede darles a las cinco y la comprobacion seria intermitente.
+  const sociasEnTotal = new Set(filasDe('UserGroupLinks')
+    .filter((f) => (f[4] || '') !== 'inactivo').map((f) => f[0])).size;
+  const entraron = new Set(entradas.map((f) => f[1])).size;
+  t.check('pero NO todas: quien nunca entro tambien es un dato',
+    entraron < sociasEnTotal, `entraron ${entraron} de ${sociasEnTotal} socias`);
+  // Exigir ">= 1 aparato" no comprobaba nada: siempre hay al menos uno. Lo que
+  // se quiere fijar es que el aparato sea uno de los de verdad y que la mayoria
+  // entre por el movil, que es como usan esto las socias.
+  const aparatos = [...new Set(entradas.map((f) => f[2]))];
+  t.check('los aparatos son de los que existen',
+    aparatos.every((x) => ['movil', 'escritorio'].includes(x)), JSON.stringify(aparatos));
+  const porMovil = entradas.filter((f) => f[2] === 'movil').length;
+  t.check('y la mayoria entra desde el movil',
+    porMovil > entradas.length / 2, `${porMovil} de ${entradas.length}`);
   t.check('con fechas repartidas, no todas el mismo dia',
     new Set(entradas.map((f) => (f[0] || '').slice(0, 10))).size > 3,
     `${new Set(entradas.map((f) => (f[0] || '').slice(0, 10))).size} dias distintos`);
@@ -437,9 +450,29 @@ module.exports = async function run() {
   t.check('hay asambleas cerradas', asambleas.length > 0 && asambleas.every((f) => f[5] === 'cerrada'),
     JSON.stringify(asambleas.map((f) => f[5])));
   t.check('con su lista de asistencia', asistencia.length > 0, `${asistencia.length}`);
-  t.check('y con acuerdos aprobados y votados',
-    acuerdos.length > 0 && acuerdos.every((f) => f[7] === 'aprobado') && votos.length > 0,
+  t.check('y con acuerdos votados', acuerdos.length > 0 && votos.length > 0,
     JSON.stringify({ acuerdos: acuerdos.length, votos: votos.length }));
+
+  // LO QUE IMPORTA NO ES QUE SALGAN APROBADOS, sino que el acta cuadre con las
+  // papeletas. Antes el recuento salia de un contador y las papeletas se
+  // escribian con las N PRIMERAS socias de la lista, que no son las mismas:
+  // habia votos de gente marcada AUSENTE y recuentos que no cuadraban.
+  acuerdos.forEach((ac) => {
+    const idAcu = ac[0];
+    const suyos = votos.filter((v) => v[0] === idAcu);
+    const aFavor = suyos.filter((v) => v[4] === 'favor').length;
+    const enContra = suyos.filter((v) => v[4] === 'contra').length;
+    t.eq(`el recuento a favor cuadra con las papeletas (${idAcu})`, Number(ac[12]), aFavor);
+    t.eq(`y el recuento en contra tambien (${idAcu})`, Number(ac[13]), enContra);
+    t.eq(`y el resultado sale de esos votos (${idAcu})`,
+      ac[7], aFavor > enContra ? 'aprobado' : 'rechazado');
+
+    // Y nadie vota si no vino a la asamblea.
+    const presentes = new Set(asistencia
+      .filter((a) => a[0] === ac[1] && a[3] === 'presente').map((a) => a[2]));
+    const colados = suyos.filter((v) => !presentes.has(v[3])).map((v) => v[3]);
+    t.eq(`nadie vota sin haber venido (${idAcu})`, colados.length, 0, JSON.stringify(colados));
+  });
 
   // ===================================================================
   t.section('DEM 16. Limpiar se lleva tambien las entradas y las actas');

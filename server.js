@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.16-auditoria-1';
+const BACKEND_VERSION = '2026.09.16-auditoria-2';
 
 let gobApi = null;
 
@@ -4049,6 +4049,7 @@ const buildGroupsLookup = async () => {
     const byId = new Map();
     const byName = new Map();
     const names = [];
+    const ambiguos = new Set();
     // El tope de socias (columna M) sale de ESTA misma lectura. Antes se volvia
     // a leer la hoja Groups entera una vez por cada fila del Excel solo para
     // mirar ese numero.
@@ -4063,12 +4064,20 @@ const buildGroupsLookup = async () => {
         }
         if (groupName) {
             const normalizedName = normalizeImportLookupKey(groupName);
+            // DOS GRUPOS CON EL MISMO NOMBRE. Antes el Map se quedaba con el
+            // ultimo, asi que la nomina entera caia en el que estuviera mas
+            // abajo en la hoja, en silencio y sin forma de saberlo. Ahora se
+            // marca como ambiguo y la importacion se niega a elegir por su
+            // cuenta.
+            if (byName.has(normalizedName) && byName.get(normalizedName) !== groupId) {
+                ambiguos.add(normalizedName);
+            }
             byName.set(normalizedName, groupId);
             names.push({ normalizedName, groupId, groupName });
         }
     });
 
-    return { byId, byName, names, topes };
+    return { byId, byName, names, topes, ambiguos };
 };
 
 const levenshteinDistance = (a, b) => {
@@ -4120,6 +4129,17 @@ const resolveImportGroupId = (rawGroup, groupsLookup, avisos) => {
     const byIdMatch = groupsLookup.byId.get(key);
     if (byIdMatch) return byIdMatch;
 
+    if (groupsLookup.ambiguos && groupsLookup.ambiguos.has(key)) {
+        if (Array.isArray(avisos)) {
+            avisos.push(
+                `Hay mas de un grupo llamado "${groupRef}" en la hoja Groups. No se puede `
+                + 'adivinar a cual va esta gente: cambia el nombre de uno de los dos o usa su '
+                + 'identificador en la columna Group.'
+            );
+        }
+        return '';
+    }
+
     const byNameMatch = groupsLookup.byName.get(key);
     if (byNameMatch) return byNameMatch;
 
@@ -4129,11 +4149,19 @@ const resolveImportGroupId = (rawGroup, groupsLookup, avisos) => {
         if (!largo) continue;
         const similarity = 1 - (levenshteinDistance(key, entry.normalizedName) / largo);
         if (!best || similarity > best.similarity) {
-            best = { similarity, groupId: entry.groupId, groupName: entry.groupName };
+            best = { similarity, groupId: entry.groupId, groupName: entry.groupName,
+                normalizada: entry.normalizedName };
         }
     }
 
+    // "Mi aguinaldo 1" y "Mi aguinaldo 2" se parecen en un 92 %, pero son dos
+    // grupos distintos: la cifra del final es justo lo que los separa. Si los
+    // numeros finales no coinciden, no hay erratita que valga.
+    const colaNumerica = (x) => (String(x).match(/\d+$/) || [''])[0];
+    const mismaCola = best && colaNumerica(key) === colaNumerica(best.normalizada || '');
+
     if (best
+        && mismaCola
         && best.similarity >= PARECIDO_MINIMO_GRUPO
         && key.length >= LARGO_MINIMO_GRUPO
         && normalizeImportLookupKey(best.groupName).length >= LARGO_MINIMO_GRUPO) {
@@ -4330,6 +4358,20 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
             summary.avisos.push(
                 `Fila ${rowNumber}: ${email} no trae grupo en la columna Group, asi que queda `
                 + 'con cuenta pero sin caja. Rellena esa columna y vuelve a subir el archivo.'
+            );
+            continue;
+        }
+
+        // Si hay DOS grupos con ese nombre, no se elige a ciegas y tampoco se
+        // crea un tercero: la fila se queda fuera y se dice por que. Crear otro
+        // homonimo empeoraria el lio que se esta avisando.
+        if (groupsLookup && groupsLookup.ambiguos
+            && groupsLookup.ambiguos.has(normalizeImportLookupKey(groupReference))) {
+            summary.failed += 1;
+            summary.errors.push(
+                `Fila ${rowNumber}: hay mas de un grupo llamado "${groupReference}" en la hoja, `
+                + 'asi que no se puede saber a cual va. Cambia el nombre de uno de los dos o pon '
+                + 'su identificador en la columna Group.'
             );
             continue;
         }

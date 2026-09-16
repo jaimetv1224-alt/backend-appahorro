@@ -385,7 +385,13 @@ module.exports.register = function register(app, ctx) {
           .filter((s) => (ahorroDe.get(s.email) || 0) >= 60)
           .slice(0, 2 + Math.floor(azar() * 2));
         candidatas.forEach((s, idx) => {
-          const principal = 50 * (1 + Math.floor(azar() * 6));      // 50..300
+          // El reglamento limita el credito a un multiplo del ahorro de la
+          // socia (TopePrestamoFactorAhorro, por defecto 3). Antes se sorteaba
+          // el importe a ciegas y uno de cada tres prestamos nacia por encima
+          // de su cupo: numeros que el propio sistema nunca habria aprobado.
+          const suAhorro = ahorroDe.get(s.email) || 0;
+          const tope = Math.max(50, Math.floor((suAhorro * 3) / 50) * 50);
+          const principal = Math.min(tope, 50 * (1 + Math.floor(azar() * 6)));
           const plazo = 3 + Math.floor(azar() * 4);                  // 3..6 meses
           const total = Math.round(principal * (1 + (interesMensual / 100) * plazo) * 100) / 100;
           const { a, m } = meses[Math.min(meses.length - 1, 1 + Math.floor(azar() * Math.max(1, meses.length - 2)))];
@@ -500,28 +506,42 @@ module.exports.register = function register(app, ctx) {
             'Aportes, prestamos y utilidades', presi, masDias(fAsa, -7),
             masDias(fAsa, 0, 18), masDias(fAsa, 0, 20), presi, '', MARCA,
           ]);
-          let asistentes = 0;
+          // LOS QUE VOTAN SON LOS QUE VINIERON, y el recuento sale de las
+          // papeletas de verdad. Antes 'asistentes' era un contador y luego se
+          // votaba con las N PRIMERAS socias de la lista, que no son las
+          // mismas: salian papeletas de gente marcada ausente, y el recuento
+          // del acuerdo no cuadraba con los votos escritos.
+          const presentes = [];
           datos.socias.forEach((s) => {
             const vino = azar() < 0.78;
-            if (vino) asistentes += 1;
+            if (vino) presentes.push(s);
             filasAsistencia.push([
               idAsa, gid, s.email, vino ? 'presente' : 'ausente', presi, masDias(fAsa, 0, 18),
             ]);
           });
+          // Una asamblea sin nadie no se celebra.
+          if (!presentes.length) presentes.push(datos.socias[0]);
+
           const idAcu = `${PREFIJO}acu_${marcaDe(gid)}`;
-          const aFavor = Math.max(1, Math.round(asistentes * 0.85));
+          const papeletas = presentes.map((s) => ({
+            socia: s,
+            voto: azar() < 0.85 ? 'favor' : 'contra',
+          }));
+          const aFavor = papeletas.filter((x) => x.voto === 'favor').length;
+          const enContra = papeletas.length - aFavor;
+          papeletas.forEach((x) => {
+            filasVotos.push([
+              idAcu, idAsa, gid, x.socia.email, x.voto,
+              masDias(fAsa, 0, 19), normalizeGroupRole(x.socia.rol),
+            ]);
+          });
           filasAcuerdos.push([
             idAcu, idAsa, gid, 'cambio_reglas', `Confirmar el reglamento del ciclo ${MARCA}`,
             `Valor de la accion en $${valorAccion} e interes del ${interesMensual}% mensual`,
-            '{}', 'aprobado', presi, masDias(fAsa, -2), masDias(fAsa, 0, 19), masDias(fAsa, 0, 19),
-            aFavor, Math.max(0, asistentes - aFavor), 0,
+            '{}', aFavor > enContra ? 'aprobado' : 'rechazado', presi,
+            masDias(fAsa, -2), masDias(fAsa, 0, 19), masDias(fAsa, 0, 19),
+            aFavor, enContra, 0,
           ]);
-          datos.socias.slice(0, asistentes).forEach((s) => {
-            filasVotos.push([
-              idAcu, idAsa, gid, s.email, azar() < 0.85 ? 'a_favor' : 'en_contra',
-              masDias(fAsa, 0, 19), normalizeGroupRole(s.rol),
-            ]);
-          });
           nAsambleas = 1;
         }
 
