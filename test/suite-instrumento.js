@@ -44,7 +44,7 @@ module.exports = async function run() {
   };
 
   const entrar = (email, fechaIso) => fake.ensureSheet(acc.HOJA).grid
-    .push([fechaIso, email, 'movil', 'Android', 'Chrome', '1.1.1.1', 'UA', 'web']);
+    .push([fechaIso, email, 'movil', 'Android', 'Chrome', '1.1.1.1', 'UA', 'vuelta']);
   const aportar = (email, gid, monto, fecha, id) => fake.ensureSheet('Savings').grid.push([
     email, gid, monto, fecha, 'mensual', 'aporte', 'confirmado',
     email, 'teso@juntago.test', `${fecha}T10:00:00.000Z`, id, '',

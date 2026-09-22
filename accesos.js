@@ -155,6 +155,21 @@ function resumirAccesos(filas = []) {
   };
 }
 
+/**
+ * Los origenes que escribe el SISTEMA cuando alguien entra de verdad. Vive aqui,
+ * pegado a quien los escribe, para que no se pueda desincronizar.
+ *
+ * Quien lea esta hoja para medir el uso tiene que aceptar SOLO estos, no
+ * descartar los que sabe que son sembrados. La diferencia importa: una lista
+ * negra falla hacia el lado peligroso. Si manana aparece un origen nuevo, o si
+ * la columna se desplaza, descartar 'demo' deja pasar como real todo lo demas y
+ * la ventana de medicion se ensancha sin que nada lo delate. Medido: contando
+ * lo sembrado, el registro aparenta 193 dias desde junio de 2025 en vez de los
+ * 3 dias que cubre de verdad, y con eso el uso parece comprobado.
+ */
+const ORIGENES_REALES = Object.freeze(['login', 'vuelta']);
+const ORIGEN_SEMBRADO = 'demo';
+
 /** La fila tal como se guarda en la hoja. */
 function filaDeAcceso(email, ua, ip, fecha = new Date().toISOString(), origen = 'login') {
   const { dispositivo, sistema, navegador } = interpretarNavegador(ua);
@@ -191,4 +206,5 @@ function accesoDesdeFila(row) {
 module.exports = {
   HOJA, CABECERA, MINUTOS_DE_SESION, interpretarNavegador, franjaHoraria,
   horaEnEcuador, resumirAccesos, filaDeAcceso, accesoDesdeFila,
+  ORIGENES_REALES, ORIGEN_SEMBRADO,
 };

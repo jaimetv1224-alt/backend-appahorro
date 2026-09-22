@@ -40,7 +40,7 @@ module.exports = async function run() {
 
   /** Una entrada a la app, tal como la escribe la hoja de Accesos. */
   const acceso = (email, fechaIso, dispositivo, sistema, navegador) => fake.ensureSheet(HOJA).grid
-    .push([fechaIso, email, dispositivo, sistema, navegador, '190.0.0.1', 'UA', 'web']);
+    .push([fechaIso, email, dispositivo, sistema, navegador, '190.0.0.1', 'UA', 'vuelta']);
 
   // ===================================================================
   t.section('INF 1. La directiva sale con nombre y correo');

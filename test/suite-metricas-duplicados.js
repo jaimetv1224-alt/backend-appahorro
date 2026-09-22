@@ -46,7 +46,7 @@ module.exports = async function run() {
   fake.seedSheet(acc.HOJA, [acc.CABECERA]);
   for (const d of ['2026-03-01', '2026-03-05', '2026-03-09']) {
     fake.ensureSheet(acc.HOJA).grid.push(
-      [`${d}T10:00:00.000Z`, e.users.socio1.email, 'movil', 'Android', 'Chrome', '1.1.1.1', 'UA', 'web']);
+      [`${d}T10:00:00.000Z`, e.users.socio1.email, 'movil', 'Android', 'Chrome', '1.1.1.1', 'UA', 'vuelta']);
   }
   hoja.invalidarTodo();
 

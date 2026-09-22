@@ -363,6 +363,56 @@ module.exports = async function run() {
     r.body.indicador.cumple, false);
 
   // ===================================================================
+  t.section('REC 7. Una marca de acceso desconocida no pasa por real');
+  // ===================================================================
+  // El filtro de accesos era una LISTA NEGRA: descartaba 'demo' y daba por real
+  // todo lo demas. Eso falla hacia el lado peligroso. Si manana aparece un
+  // origen nuevo, o si la columna se desplaza, lo sembrado pasa por bueno y la
+  // ventana se ensancha sin que nada lo delate: medido contra la base real,
+  // de 3 dias a 193. Ahora es lista blanca y lo que no se sabe clasificar
+  // bloquea la afirmacion en vez de colarse.
+  m = await montarProduccion([['g_juntos', 8]]);
+
+  // Se cambia la marca de TODO lo sembrado por una que el sistema nunca escribe,
+  // que es exactamente lo que pasaria si el filtro se quedara obsoleto.
+  const accesos = fake.ensureSheet(acc.HOJA).grid;
+  let cambiadas = 0;
+  for (const f of accesos) {
+    if (String(f[7]).toLowerCase() === 'demo') { f[7] = 'sincronizacion'; cambiadas += 1; }
+  }
+  hoja.invalidarTodo();
+  t.check('se disfrazaron las entradas sembradas', cambiadas > 500, `${cambiadas}`);
+
+  r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
+  t.status('el instrumento responde igual', r, 200);
+  t.eq('pero NO se declara medible', r.body.indicador.medible, false);
+  // Las 821 disfrazadas van de marzo a agosto. Si se colaran, la ventana se
+  // ensancharia hacia atras y los apuntes se irian a varios cientos. Lo que
+  // queda son las entradas de verdad del escenario, todas de septiembre.
+  t.check('ninguna de las 821 disfrazadas se cuenta como real',
+    r.body.indicador.ventanaDeRegistro.apuntes < 100,
+    JSON.stringify(r.body.indicador.ventanaDeRegistro));
+  t.check('y la ventana no se ensancha hacia atras',
+    String(r.body.indicador.ventanaDeRegistro.desde) >= '2026-09-01',
+    JSON.stringify(r.body.indicador.ventanaDeRegistro));
+  t.eq('la ventana se marca como no fiable',
+    r.body.indicador.ventanaDeRegistro.fiable, false);
+  t.check('y se dice QUE marca no se supo leer',
+    (r.body.indicador.ventanaDeRegistro.marcasDesconocidas || []).includes('sincronizacion'),
+    JSON.stringify(r.body.indicador.ventanaDeRegistro.marcasDesconocidas));
+
+  const ind7 = ((r.body.hojas || []).find((h) => h.nombre === 'Indicador') || {}).filas || [];
+  t.check('el documento lo avisa arriba, con el nombre de la marca',
+    ind7.some((x) => /marcas desconocidas/i.test(String(x.Concepto))
+      && /sincronizacion/.test(String(x.Valor))),
+    JSON.stringify(ind7.slice(0, 3)));
+
+  const g7 = ((r.body.hojas || []).find((h) => h.nombre === 'Grupos') || {}).filas || [];
+  t.check('y ningun grupo se da por digitalizado con ese registro',
+    g7.every((g) => g.DIGITALIZADA !== 'si'),
+    JSON.stringify(g7.filter((g) => g.DIGITALIZADA === 'si').map((x) => x.Grupo)));
+
+  // ===================================================================
   t.section('REC 6. Sin ficha de campo no hay indicador, y se dice');
   // ===================================================================
   // ES EL ESTADO DE PRODUCCION HOY: la hoja SeguimientoCampo ni siquiera existe.

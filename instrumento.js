@@ -108,6 +108,9 @@ module.exports.register = function register(app, ctx) {
     ensureSheetExists, hojaAccesos, accesoDesdeFila, sanitizeCell,
   } = ctx;
 
+  // La lista blanca de origenes vive en accesos.js, pegada a quien los escribe.
+  const { ORIGENES_REALES, ORIGEN_SEMBRADO } = require('./accesos');
+
   const hojaSinFilas = (e) => /Unable to parse range|exceeds grid limits|not found/i
     .test((e && e.message) || '');
 
@@ -317,7 +320,18 @@ module.exports.register = function register(app, ctx) {
       const prestamosR = real(prestamos, LOAN.id);
       const pagosR = real(pagos, PAGO.id);
       const asambleasR = real(asambleas, ASA.id);
-      const accesosR = incluirDemo ? accesos : accesos.filter((f) => bajo(f[7]) !== 'demo');
+      // LISTA BLANCA, no lista negra. Se aceptan solo los origenes que escribe
+      // el sistema cuando alguien entra de verdad ('login' y 'vuelta', definidos
+      // en accesos.js junto a quien los escribe). Descartar 'demo' y dar por
+      // real todo lo demas falla hacia el lado peligroso: si aparece un origen
+      // nuevo o la columna se desplaza, lo sembrado pasa por bueno y la ventana
+      // de medicion se ensancha sin que nada lo delate.
+      const origenDe = (f) => bajo(f[7]) || 'login';   // vacio = login, como accesoDesdeFila
+      const esOrigenReal = (f) => ORIGENES_REALES.includes(origenDe(f));
+      const marcasDesconocidas = [...new Set(accesos.map(origenDe)
+        .filter((o) => o !== ORIGEN_SEMBRADO && !ORIGENES_REALES.includes(o)))];
+
+      const accesosR = incluirDemo ? accesos : accesos.filter(esOrigenReal);
 
       // Desde cuando y hasta cuando hay registro de entradas de verdad. Sin
       // esto, la condicion de uso se lee como una medicion cuando en realidad
@@ -331,6 +345,16 @@ module.exports.register = function register(app, ctx) {
         hasta: diasDeAcceso[diasDeAcceso.length - 1] || null,
         apuntes: diasDeAcceso.length,
         dias: new Set(diasDeAcceso).size,
+        // Si hay marcas que este modulo no sabe clasificar, la ventana no se
+        // puede dar por buena: puede estar contando como real algo que no lo es.
+        //
+        // OJO, no se mezcla con incluirDemo. Pedir el documento con los datos de
+        // demostracion dentro sirve para ENSENAR el funcionamiento, asi que ahi
+        // el uso si se calcula; lo que no se puede es presentar ese resultado
+        // como una medicion, y de eso se encarga `medible` mas abajo. Si se
+        // mezclaran, el modo demostracion dejaria de ensenar nada.
+        fiable: marcasDesconocidas.length === 0,
+        marcasDesconocidas,
       };
 
       // --- gente ----------------------------------------------------------
@@ -420,7 +444,8 @@ module.exports.register = function register(app, ctx) {
           .map((s) => dia(s.desde))
           .filter(Boolean)
           .sort()[0] || null;
-        const usanMedible = !!ventana.desde && (!altaMasVieja || ventana.desde <= altaMasVieja);
+        const usanMedible = ventana.fiable && !!ventana.desde
+          && (!altaMasVieja || ventana.desde <= altaMasVieja);
 
         const cumple = {
           directiva: cargos.has('presidente') && cargos.has('tesorero'),
@@ -575,6 +600,15 @@ module.exports.register = function register(app, ctx) {
           Concepto: 'AVISO',
           Valor: 'Este documento INCLUYE datos de demostracion. NO sirve como medio de '
                + 'verificacion ante el INCYT. Para el informe hay que generarlo sin ellos.',
+        }] : []),
+        ...(ventana.marcasDesconocidas.length > 0 ? [{
+          Concepto: 'ATENCION: el registro de entradas trae marcas desconocidas',
+          Valor: `La hoja de accesos contiene el origen ${ventana.marcasDesconocidas
+            .map((m) => `"${m}"`).join(', ')}, que este instrumento no sabe clasificar. `
+               + `Solo reconoce ${ORIGENES_REALES.map((m) => `"${m}"`).join(' y ')} como entradas `
+               + `reales y "${ORIGEN_SEMBRADO}" como sembradas. Mientras haya marcas sin clasificar `
+               + 'no se puede afirmar nada sobre el uso, porque podria estar contando como real '
+               + 'algo que no lo es. Todos los grupos salen como "sin medir" en esa condicion.',
         }] : []),
         // Y este solo cuando de verdad hay grupos sin evaluar. Colgarlo de
         // `!medible` lo disparaba tambien con los datos sembrados dentro, y
