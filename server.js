@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.22-ventana-medicion';
+const BACKEND_VERSION = '2026.09.22-cuota-honesta';
 
 let gobApi = null;
 
@@ -535,21 +535,18 @@ const aporteConfirmado = (valor) => estadoAporteCell(valor) === 'confirmado';
 const SAVINGS_ESTADO_IDX = 6;
 const ACCIONES_ESTADO_IDX = 7;
 
-const isQuotaExceededError = (error) => {
-  const statusCandidates = [
-    error?.status,
-    error?.code,
-    error?.response?.status,
-    error?.response?.statusCode,
-    error?.response?.data?.error?.code,
-    error?.cause?.code,
-  ];
-  const status = statusCandidates
-    .map((candidate) => Number(candidate))
-    .find((candidate) => Number.isFinite(candidate));
-  const message = `${error?.message || ''} ${error?.cause?.message || ''}`.toLowerCase();
-  return status === 429 || message.includes('quota exceeded') || message.includes('resource_exhausted');
-};
+/**
+ * Que la pestana no exista, o exista con solo la cabecera, NO es un fallo:
+ * Google rechaza A2:X con "exceeds grid limits. Max rows: 1" y eso significa
+ * "sin filas". Cualquier OTRO error de lectura si es un fallo y hay que decirlo
+ * en vez de devolver una lista vacia, que se lee como "no hay nada".
+ *
+ * Este predicado estaba copiado cuatro veces por el proyecto (informe.js,
+ * demo.js, instrumento.js y movimientoEnGrupo). Aqui esta el quinto uso, asi
+ * que vive en un solo sitio.
+ */
+const hojaSinFilas = (e) => /Unable to parse range|exceeds grid limits|not found/i
+  .test((e && e.message) || '');
 
 /**
  * Si un vinculo usuario-grupo sigue vivo.
@@ -686,12 +683,11 @@ app.get('/api/grupos-del-usuario', async (req, res) => {
     return res.json({ grupos: result });
   } catch (err) {
     console.error('Error en /api/grupos-del-usuario:', err);
-    if (isQuotaExceededError(err)) {
-      return res.status(200).json({
-        grupos: [],
-        warning: 'Límite temporal de lecturas alcanzado. Intenta nuevamente en unos segundos.'
-      });
-    }
+    // Un fallo de lectura NO puede contarse como "no perteneces a ningun grupo".
+    // Devolver la lista vacia con HTTP 200 hacia que la socia viera la pantalla
+    // de bienvenida, como si la hubieran sacado de su caja.
+    if (responderSiEsCuota(res, err)) return;
+    if (hojaSinFilas(err)) return res.json({ grupos: [] });
     return res.status(500).json({ error: 'Error interno al obtener grupos del usuario' });
   }
 });
@@ -5229,9 +5225,7 @@ app.get('/api/admin/transacciones', requireAdmin, async (req, res) => {
         return res.json({ transacciones });
     } catch (error) {
         console.error('[ADMIN TRANSACCIONES] Error:', error.message);
-        if (isQuotaExceededError(error)) {
-            return res.status(200).json({ transacciones: [], warning: 'Limite temporal de lecturas alcanzado.' });
-        }
+        if (responderSiEsCuota(res, error)) return;
         return res.status(500).json({ message: 'Error al obtener transacciones.', transacciones: [] });
     }
 });
@@ -5326,9 +5320,7 @@ app.get('/api/admin/resumen', requireAdmin, async (req, res) => {
         });
     } catch (error) {
         console.error('[ADMIN RESUMEN] Error:', error.message);
-        if (isQuotaExceededError(error)) {
-            return res.status(200).json({ resumen: null, warning: 'Limite temporal de lecturas alcanzado.' });
-        }
+        if (responderSiEsCuota(res, error)) return;
         return res.status(500).json({ message: 'Error al obtener el resumen.', resumen: null });
     }
 });
@@ -5419,9 +5411,17 @@ app.get('/api/obtener-grupos', async (req, res) => {
     res.json({ grupos });
   } catch (error) {
     console.error('Error al leer grupos de Google Sheets:', error.message);
-    return res.status(200).json({
-      grupos: [],
-      warning: 'No se pudieron leer grupos temporalmente.',
+    // Una lista vacia con HTTP 200 se lee como "no hay grupos". Hay que
+    // distinguir los dos casos: una hoja recien creada SI devuelve vacio de
+    // forma legitima (regla de 'exceeds grid limits'), pero un fallo de lectura
+    // tiene que decirse.
+    if (responderSiEsCuota(res, error)) return;
+    if (hojaSinFilas(error)) return res.json({ grupos: [] });
+    return res.status(503).json({
+      success: false,
+      motivo: 'lectura_fallida',
+      grupos: null,
+      message: 'No se pudo leer la lista de grupos. Reintenta en unos segundos.',
     });
   }
 });
@@ -6332,14 +6332,7 @@ app.get('/api/pending-payments', async (req, res) => {
 
   } catch (error) {
     console.error('[PENDING PAYMENTS] Error:', error.message, error.stack);
-    if (isQuotaExceededError(error)) {
-      return res.status(200).json({
-        success: true,
-        payments: [],
-        total: 0,
-        warning: 'Límite temporal de lecturas alcanzado. Intenta nuevamente en unos segundos.'
-      });
-    }
+    if (responderSiEsCuota(res, error)) return;
     res.status(500).json({ 
       success: false, 
       message: 'Error al obtener pagos pendientes: ' + error.message 
@@ -6463,14 +6456,7 @@ app.get('/api/user-loan-payments', async (req, res) => {
     });
   } catch (error) {
     console.error('[USER LOAN PAYMENTS] Error:', error.message, error.stack);
-    if (isQuotaExceededError(error)) {
-      return res.status(200).json({
-        success: true,
-        payments: [],
-        total: 0,
-        warning: 'Límite temporal de lecturas alcanzado. Intenta nuevamente en unos segundos.'
-      });
-    }
+    if (responderSiEsCuota(res, error)) return;
     return res.status(500).json({
       success: false,
       message: 'Error al obtener pagos del usuario: ' + error.message
@@ -7528,14 +7514,7 @@ app.get('/api/savings', async (req, res) => {
 
   } catch (error) {
     console.error('[GET SAVINGS] Error:', error.message, error.stack);
-    if (isQuotaExceededError(error)) {
-      return res.status(200).json({
-        success: true,
-        savings: [],
-        total: 0,
-        warning: 'Límite temporal de lecturas alcanzado. Intenta nuevamente en unos segundos.'
-      });
-    }
+    if (responderSiEsCuota(res, error)) return;
     res.status(500).json({ 
       success: false, 
       message: 'Error al obtener ahorros: ' + error.message 
@@ -7565,21 +7544,9 @@ app.get('/api/savings/stats', async (req, res) => {
 
   } catch (error) {
     console.error('[GET SAVINGS STATS] Error:', error.message, error.stack);
-    if (isQuotaExceededError(error)) {
-      return res.status(200).json({
-        success: true,
-        stats: {
-          totalSavings: 0,
-          totalSavingsAmount: 0,
-          totalShares: 0,
-          totalSharesAmount: 0,
-          monthlySavings: 0,
-          monthlyShares: 0,
-          monthlyTrend: [],
-        },
-        warning: 'Límite temporal de lecturas alcanzado. Intenta nuevamente en unos segundos.'
-      });
-    }
+    // Este era el peor de todos: devolvia el patrimonio entero a cero con
+    // HTTP 200. La socia abria la app y veia "$0.00" donde estaban sus ahorros.
+    if (responderSiEsCuota(res, error)) return;
     res.status(500).json({ 
       success: false, 
       message: 'Error al obtener estadísticas: ' + error.message 
@@ -8275,14 +8242,7 @@ app.get('/api/savings/goals', async (req, res) => {
 
   } catch (error) {
     console.error('[GET SAVINGS GOALS] Error:', error.message, error.stack);
-    if (isQuotaExceededError(error)) {
-      return res.status(200).json({
-        success: true,
-        goals: [],
-        total: 0,
-        warning: 'Límite temporal de lecturas alcanzado. Intenta nuevamente en unos segundos.'
-      });
-    }
+    if (responderSiEsCuota(res, error)) return;
     res.status(500).json({ 
       success: false, 
       message: 'Error al obtener metas: ' + error.message 

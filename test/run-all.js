@@ -64,6 +64,8 @@ const SUITES = [
   // indicador sobre la forma real de produccion. Construye su propio escenario
   // de cero, asi que no puede ir en medio de otra suite.
   ['Reconstruccion de la produccion (indicador real)', require('./suite-reconstruccion-produccion')],
+  // La ULTIMA de todas: inyecta fallos de cuota a proposito en varias hojas.
+  ['Cuota agotada: se dice, no se devuelven ceros', require('./suite-cuota-honesta')],
 ];
 
 (async () => {
