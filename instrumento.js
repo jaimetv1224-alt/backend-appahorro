@@ -110,6 +110,7 @@ module.exports.register = function register(app, ctx) {
 
   // La lista blanca de origenes vive en accesos.js, pegada a quien los escribe.
   const { ORIGENES_REALES, ORIGEN_SEMBRADO, cabeceraCorrecta } = require('./accesos');
+  const MARCA_DEMO = require('./demo').MARCA.toLowerCase();
 
   const hojaSinFilas = (e) => /Unable to parse range|exceeds grid limits|not found/i
     .test((e && e.message) || '');
@@ -341,8 +342,22 @@ module.exports.register = function register(app, ctx) {
       // columna que ya no esta donde deberia. Las dos producen el MISMO valor
       // vacio, asi que sin mirar la cabecera son indistinguibles, y una de las
       // dos deja entrar lo sembrado.
+      // Una fila sembrada lleva DOS marcas independientes: 'demo' en la columna
+      // de origen y "[demo]" dentro del UserAgent. La segunda es la que cierra
+      // el unico hueco que quedaba en este razonamiento: si apareciera una fila
+      // sin marca de origen, no seria solo de tipo desconocido, seria de
+      // procedencia desconocida (¿un acceso antiguo o una siembra antigua?), y
+      // darla por inicio de sesion readmitiria por detras justo lo que la lista
+      // blanca deja fuera. Con el rastro del UserAgent esa duda se resuelve.
+      //
+      // (Comprobado en el historial: la columna Origen es del 15 de septiembre
+      // de 2026 y el sembrado de accesos del 16, y su primera version ya
+      // escribia las dos marcas. Asi que hoy ninguna fila sembrada puede estar
+      // sin marca. Esto es el cinturon por si eso deja de ser cierto.)
+      const rastroDeSiembra = (f) => String(f[6] || '').toLowerCase().includes(MARCA_DEMO);
       const origenDe = (f) => bajo(f[7])
-        || (cabeceraAccesosOk ? 'login' : 'columna-origen-desplazada');
+        || (rastroDeSiembra(f) ? ORIGEN_SEMBRADO
+          : (cabeceraAccesosOk ? 'login' : 'columna-origen-desplazada'));
       const esOrigenReal = (f) => ORIGENES_REALES.includes(origenDe(f));
       const marcasDesconocidas = [...new Set(accesos.map(origenDe)
         .filter((o) => o !== ORIGEN_SEMBRADO && !ORIGENES_REALES.includes(o)))];
@@ -350,9 +365,11 @@ module.exports.register = function register(app, ctx) {
       const accesosR = incluirDemo ? accesos : accesos.filter(esOrigenReal);
       // Solo cuentan como supuestos si la cabecera esta bien: si no lo esta, ya
       // quedaron fuera por 'columna-origen-desplazada'.
-      const supuestos = cabeceraAccesosOk
-        ? accesos.filter((f) => !bajo(f[7])).length
-        : 0;
+      // Solo son supuestos los que acaban clasificados como entrada real: una
+      // fila sin marca de origen pero con rastro de siembra no es un supuesto,
+      // es una siembra reconocida por la otra marca.
+      const supuestos = accesos
+        .filter((f) => !bajo(f[7]) && ORIGENES_REALES.includes(origenDe(f))).length;
       const total = accesos.length;
       const sembrados = accesos.filter((f) => origenDe(f) === ORIGEN_SEMBRADO).length;
 

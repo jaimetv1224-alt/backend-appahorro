@@ -63,8 +63,13 @@ module.exports = async function run() {
   /** Correo sintetico estable de la socia n del grupo g. */
   const correo = (gid, n) => `${gid}_s${n}@nomina.test`;
 
+  // Igual que las escribe demo.js: una fila sembrada lleva DOS marcas, 'demo'
+  // en la columna de origen y "[demo]" dentro del UserAgent. Sin la segunda,
+  // esta suite no estaria reconstruyendo la produccion sino una version mas
+  // facil de ella.
   const entrar = (email, fechaIso, origen) => fake.ensureSheet(acc.HOJA).grid
-    .push([fechaIso, email, 'movil', 'Android', 'Chrome', '1.1.1.1', 'UA', origen]);
+    .push([fechaIso, email, 'movil', 'Android', 'Chrome', '1.1.1.1',
+      origen === 'demo' ? 'Chrome [demo]' : 'UA', origen]);
 
   const aportar = (email, gid, monto, fecha, id, descripcion) => fake.ensureSheet('Savings').grid.push([
     email, gid, monto, fecha, 'mensual', descripcion, 'confirmado',
@@ -460,17 +465,22 @@ module.exports = async function run() {
   r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
   t.eq('con la cabecera correcta, la ventana vuelve a ser fiable',
     r.body.indicador.ventanaDeRegistro.fiable, true);
-  t.check('y las filas viejas sin marca cuentan como entradas reales',
-    r.body.indicador.ventanaDeRegistro.apuntes > 100,
-    JSON.stringify(r.body.indicador.ventanaDeRegistro));
+  // Las que pierden la marca y NO tienen rastro de siembra son accesos de
+  // verdad, y siguen contando. Las sembradas se reconocen por su segunda marca
+  // aunque hayan perdido la primera, asi que no se cuelan aqui.
+  const vOk = r.body.indicador.ventanaDeRegistro;
+  t.check('las filas sin marca que son accesos de verdad siguen contando',
+    vOk.apuntes > 0, JSON.stringify(vOk));
+  t.eq('y son exactamente las que perdieron la marca', vOk.supuestos, vOk.apuntes);
+  t.check('mientras las sembradas se reconocen por su segunda marca',
+    vOk.sembrados > 500, JSON.stringify(vOk));
 
   // Pero NO se esconden dentro de la cifra. Contarlas como inicio de sesion es
   // correcto (asi lo documenta quien las escribio) y a la vez es un SUPUESTO,
   // no una lectura. Meter un supuesto dentro de un numero que el INCYT va a
   // leer como medicion es la clase de cosa que nadie detecta despues.
-  t.check('pero se declara cuantas llevan el origen supuesto',
-    r.body.indicador.ventanaDeRegistro.supuestos > 100,
-    JSON.stringify(r.body.indicador.ventanaDeRegistro));
+  t.check('y se declara que llevan el origen supuesto',
+    vOk.supuestos > 0, JSON.stringify(vOk));
   const ind8 = ((r.body.hojas || []).find((h) => h.nombre === 'Indicador') || {}).filas || [];
   t.check('y el documento lo dice, con el numero y de quien es la decision',
     ind8.some((x) => /origen supuesto/i.test(String(x.Concepto))
@@ -493,6 +503,36 @@ module.exports = async function run() {
       && String(x.Valor).includes(`${v8.apuntes} entradas reales`)
       && String(x.Valor).includes(`${v8.sembrados} sembradas`)),
     JSON.stringify(ind8.find((x) => /como se reparten/i.test(String(x.Concepto)))));
+
+  // ===================================================================
+  t.section('REC 9. La segunda marca cierra el hueco de la primera');
+  // ===================================================================
+  // EL HUECO QUE QUEDABA. Dar por inicio de sesion una fila sin marca de origen
+  // es seguro solo si ninguna fila SEMBRADA puede estar sin marca. Si pudiera,
+  // darla por real readmitiria por detras justo lo que la lista blanca deja
+  // fuera, y la ventana se ensancharia otra vez hacia 2025. La segunda marca
+  // (el rastro "[demo]" dentro del UserAgent) resuelve esa duda sin depender de
+  // que la primera este puesta.
+  m = await montarProduccion([['g_juntos', 8]]);
+  const conRastro = fake.ensureSheet(acc.HOJA).grid;
+  let disfrazadas = 0;
+  for (let i = 1; i < conRastro.length; i += 1) {
+    // Se les quita la marca de origen a las sembradas, pero conservan su rastro.
+    if (/\[demo\]/i.test(String(conRastro[i][6] || ''))) { conRastro[i][7] = ''; disfrazadas += 1; }
+  }
+  hoja.invalidarTodo();
+  t.check('hay filas sembradas a las que se les quito la marca de origen',
+    disfrazadas > 500, `${disfrazadas}`);
+
+  r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
+  const vR = r.body.indicador.ventanaDeRegistro;
+  t.check('se siguen reconociendo como sembradas por el rastro del UserAgent',
+    vR.sembrados > 500, JSON.stringify(vR));
+  t.eq('y NO se cuentan como supuestos', vR.supuestos, 0);
+  t.check('la ventana no se ensancha hacia 2025',
+    String(vR.desde) >= '2026-09-01', JSON.stringify(vR));
+  t.eq('la suma sigue cerrando', vR.apuntes + vR.sembrados + vR.descartados, vR.total);
+
 
   // ===================================================================
   t.section('REC 6. Sin ficha de campo no hay indicador, y se dice');

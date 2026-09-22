@@ -101,6 +101,12 @@ const masDias = (ymd, dias, hora = 10) => {
 };
 const soloFecha = (iso) => String(iso).slice(0, 10);
 
+// Las dos marcas que lleva TODO lo sembrado, para quien tenga que reconocerlo
+// desde fuera. Se exportan para que nadie las reescriba de memoria en otro
+// modulo y se desincronicen.
+module.exports.MARCA = MARCA;
+module.exports.PREFIJO = PREFIJO;
+
 module.exports.register = function register(app, ctx) {
   const {
     getSheetsClient, SPREADSHEET_ID, normalizeEmailKey, normalizeGroupKey,
