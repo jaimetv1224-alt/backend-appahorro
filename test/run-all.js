@@ -2,8 +2,11 @@
  * Ejecuta todas las baterias de prueba del backend contra el emulador de
  * Google Sheets. No toca la hoja real ni consume cuota.
  *
- *   node test/run-all.js            (silencioso)
- *   node test/run-all.js --verbose  (con los logs del servidor)
+ *   node test/run-all.js                      (silencioso)
+ *   node test/run-all.js --verbose            (con los logs del servidor)
+ *   node test/run-all.js --aceptar-cobertura  (acepta una bajada deliberada
+ *                                              de comprobaciones como la nueva
+ *                                              referencia)
  */
 
 const fs = require('fs');

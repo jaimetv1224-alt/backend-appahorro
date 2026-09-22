@@ -93,6 +93,20 @@ function leerBase() {
 }
 
 /**
+ * Cuando la bajada es a proposito (se retiro una prueba que ya no aplica, se
+ * fundieron dos suites) hace falta poder aceptarla:
+ *
+ *     node test/run-all.js --aceptar-cobertura
+ *
+ * Sin esta salida la primera bajada legitima dejaba la bateria en rojo PARA
+ * SIEMPRE, porque la foto solo se actualiza tras una corrida impecable y la
+ * corrida nunca vuelve a serlo. Una salvaguarda de la que no se puede salir no
+ * se respeta: se borra. Y que aceptar sea un acto explicito es justo lo que
+ * hace que la bajada se mire en vez de pasar sola.
+ */
+const ACEPTAR = process.argv.includes('--aceptar-cobertura');
+
+/**
  * Guarda la foto SOLO si la corrida fue impecable. Guardarla tras una corrida
  * con fallas o abortos congelaria como normal una cobertura ya degradada, que
  * es justo lo que se quiere detectar.
@@ -131,11 +145,17 @@ function summary() {
     }
   }
   if (menguadas.length) {
-    process.stdout.write(`\n\x1b[31m\x1b[1mCOBERTURA A LA BAJA\x1b[0m\n`);
+    const color = ACEPTAR ? '\x1b[33m' : '\x1b[31m';
+    process.stdout.write(`\n${color}\x1b[1mCOBERTURA A LA BAJA${ACEPTAR ? ' (aceptada a mano)' : ''}\x1b[0m\n`);
     process.stdout.write('  Estas suites ejecutaron MENOS comprobaciones que la ultima vez que\n');
     process.stdout.write('  la bateria salio limpia. Puede que ya no esten corriendo todo.\n');
     for (const m of menguadas) {
       process.stdout.write(`    - ${m.nombre}: ${m.ahora} ahora, ${m.antes} antes\n`);
+    }
+    if (ACEPTAR) {
+      process.stdout.write('  Se acepta por --aceptar-cobertura y pasa a ser la nueva referencia.\n');
+    } else {
+      process.stdout.write('  Si la bajada es a proposito: node test/run-all.js --aceptar-cobertura\n');
     }
     process.stdout.write('\n');
   }
@@ -151,9 +171,11 @@ function summary() {
 
   // La foto de referencia solo se actualiza si TODO salio bien. Guardarla tras
   // una corrida degradada haria que la degradacion pasara a ser lo normal.
-  if (!failed && !state.abortadas.length && !menguadas.length) guardarBase();
+  // La unica excepcion es una bajada aceptada a mano, que es un acto explicito.
+  const limpia = !failed && !state.abortadas.length;
+  if (limpia && (!menguadas.length || ACEPTAR)) guardarBase();
 
-  return failed + menguadas.length;
+  return failed + (ACEPTAR ? 0 : menguadas.length);
 }
 
 module.exports = { section, suite, check, eq, near, status, statusIn, summary, abortada, state };
