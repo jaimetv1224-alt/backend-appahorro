@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.16-auditoria-3';
+const BACKEND_VERSION = '2026.09.22-instrumento';
 
 let gobApi = null;
 
@@ -8378,6 +8378,23 @@ require('./demo').register(app, {
     cabeceraAccesos: acc.CABECERA,
 });
 console.log('[BACKEND] Datos de demostracion registrados (/api/admin/demo/*).');
+
+require('./instrumento').register(app, {
+    getSheetsClient,
+    SPREADSHEET_ID,
+    normalizeEmailKey,
+    normalizeGroupKey,
+    normalizeGroupRole,
+    requireAdmin,
+    bloquear,
+    responderSiEsCuota,
+    linkIsActive,
+    ensureSheetExists,
+    hojaAccesos: acc.HOJA,
+    accesoDesdeFila: acc.accesoDesdeFila,
+    sanitizeCell,
+});
+console.log('[BACKEND] Instrumento de seguimiento registrado (/api/admin/instrumento-digitalizacion).');
 
 // ---------------------------------------------------------------------------
 //  Manejador global de errores

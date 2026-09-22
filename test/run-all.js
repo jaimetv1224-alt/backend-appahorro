@@ -58,6 +58,7 @@ const SUITES = [
   ['Datos de demostracion', require('./suite-demo')],
   // Va la ULTIMA: monta su escenario y los accesos que deja cada inicio de
   // sesion se escriben sin esperar; en medio ponian roja a la suite siguiente.
+  ['Instrumento de seguimiento (INCYT)', require('./suite-instrumento')],
   ['Correos repetidos en la hoja', require('./suite-metricas-duplicados')],
 ];
 
@@ -79,7 +80,8 @@ const SUITES = [
   const fuente = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8')
     + fs.readFileSync(path.resolve(__dirname, '..', 'governance.js'), 'utf8')
     + fs.readFileSync(path.resolve(__dirname, '..', 'informe.js'), 'utf8')
-    + fs.readFileSync(path.resolve(__dirname, '..', 'demo.js'), 'utf8');
+    + fs.readFileSync(path.resolve(__dirname, '..', 'demo.js'), 'utf8')
+    + fs.readFileSync(path.resolve(__dirname, '..', 'instrumento.js'), 'utf8');
   // digitalizacion.js y metricas.js no registran rutas: son calculo puro
   const registrados = [...fuente.matchAll(/app\.(get|post|put|delete|patch)\(\s*'([^']+)'/g)]
     .map((m) => `${m[1].toUpperCase()} ${m[2]}`);
