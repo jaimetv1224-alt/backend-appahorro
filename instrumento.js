@@ -373,6 +373,18 @@ module.exports.register = function register(app, ctx) {
       const total = accesos.length;
       const sembrados = accesos.filter((f) => origenDe(f) === ORIGEN_SEMBRADO).length;
 
+      // Las dos marcas tienen que decir lo mismo. Mientras coincidan, que falle
+      // una no deja pasar nada, porque la otra sostiene el filtro. Si empiezan a
+      // discrepar es que una se esta degradando, y hay que enterarse MIENTRAS
+      // todavia queda la otra, no cuando ya no quede ninguna. Solo se compara
+      // cuando la columna de origen dice algo: una marca vacia no afirma nada y
+      // por tanto no puede contradecir a nadie.
+      const marcasEnDesacuerdo = accesos.filter((f) => {
+        const puesto = bajo(f[7]);
+        if (!puesto) return false;
+        return (puesto === ORIGEN_SEMBRADO) !== rastroDeSiembra(f);
+      }).length;
+
       // Desde cuando y hasta cuando hay registro de entradas de verdad. Sin
       // esto, la condicion de uso se lee como una medicion cuando en realidad
       // puede estar preguntandole a un cuaderno que empezo la semana pasada.
@@ -393,7 +405,7 @@ module.exports.register = function register(app, ctx) {
         // el uso si se calcula; lo que no se puede es presentar ese resultado
         // como una medicion, y de eso se encarga `medible` mas abajo. Si se
         // mezclaran, el modo demostracion dejaria de ensenar nada.
-        fiable: marcasDesconocidas.length === 0,
+        fiable: marcasDesconocidas.length === 0 && marcasEnDesacuerdo === 0,
         marcasDesconocidas,
         // El reparto COMPLETO de las filas, para que la aritmetica del documento
         // cierre sola y nadie tenga que deducirla restando. Restar invita al
@@ -408,6 +420,7 @@ module.exports.register = function register(app, ctx) {
         // pero es un supuesto y no puede quedar escondido dentro de una cifra
         // que el INCYT va a leer como medicion. Se cuenta y se declara aparte.
         supuestos,
+        marcasEnDesacuerdo,
       };
 
       // --- gente ----------------------------------------------------------
@@ -653,6 +666,14 @@ module.exports.register = function register(app, ctx) {
           Concepto: 'AVISO',
           Valor: 'Este documento INCLUYE datos de demostracion. NO sirve como medio de '
                + 'verificacion ante el INCYT. Para el informe hay que generarlo sin ellos.',
+        }] : []),
+        ...(ventana.marcasEnDesacuerdo > 0 ? [{
+          Concepto: 'ATENCION: las dos marcas de lo sembrado no coinciden',
+          Valor: `${ventana.marcasEnDesacuerdo} filas de la hoja de accesos tienen una marca de `
+               + 'demostracion y la otra no. Lo sembrado se reconoce por dos rastros '
+               + 'independientes y mientras digan lo mismo, que falle uno no deja pasar nada. '
+               + 'Que discrepen significa que uno se esta degradando, y conviene arreglarlo '
+               + 'mientras todavia queda el otro. No se afirma nada sobre el uso hasta entonces.',
         }] : []),
         ...(ventana.supuestos > 0 ? [{
           Concepto: 'Aviso: entradas con el origen supuesto',

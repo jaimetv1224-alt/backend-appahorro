@@ -124,7 +124,10 @@ module.exports = async function run() {
   fake.seedSheet(acc.HOJA, [acc.CABECERA]);
   // Todo lo de este grupo es SEMBRADO: entradas marcadas 'demo' y aportes demo_.
   [e.users.presi, e.users.teso, e.users.secre].forEach((u, i) => fake.ensureSheet(acc.HOJA).grid
-    .push([`2026-03-0${i + 1}T10:00:00.000Z`, u.email, 'movil', 'Android', 'Chrome', '1.1.1.1', 'UA', 'demo']));
+    // Las DOS marcas que escribe demo.js, no solo la del origen: sembrar con
+    // una sola es probar contra una version mas facil de la realidad.
+    .push([`2026-03-0${i + 1}T10:00:00.000Z`, u.email, 'movil', 'Android', 'Chrome',
+      '1.1.1.1', 'Chrome [demo]', 'demo']));
   aportar(e.users.presi.email, 'CAYCD', 20, '2026-03-05', 'demo_sav_1');
   hoja.invalidarTodo();
 

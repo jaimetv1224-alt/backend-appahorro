@@ -535,6 +535,75 @@ module.exports = async function run() {
 
 
   // ===================================================================
+  t.section('REC 10. Si se borran LAS DOS marcas, la ventana se abre');
+  // ===================================================================
+  // Esta es la prueba que faltaba y la que de verdad demuestra algo. Las otras
+  // borran una marca y comprueban que la otra sostiene el filtro; las dos
+  // pasarian igual si el filtro no hiciera nada y las 821 quedaran fuera por
+  // cualquier otra razon. Solo quitando LAS DOS se ve si son las marcas las que
+  // estan trabajando. Si lo son, la ventana tiene que abrirse hasta el rango
+  // entero de lo sembrado, que es el fallo original que se vino a cerrar.
+  m = await montarProduccion([['g_juntos', 8]]);
+  const sinNada = fake.ensureSheet(acc.HOJA).grid;
+  let desnudas = 0;
+  for (let i = 1; i < sinNada.length; i += 1) {
+    if (String(sinNada[i][7]).toLowerCase() === 'demo') {
+      sinNada[i][7] = '';
+      sinNada[i][6] = 'Chrome';   // sin el rastro [demo]
+      desnudas += 1;
+    }
+  }
+  hoja.invalidarTodo();
+  t.check('se dejaron 821 filas sembradas sin ninguna de las dos marcas',
+    desnudas > 500, `${desnudas}`);
+
+  r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
+  const vD = r.body.indicador.ventanaDeRegistro;
+  t.check('sin marcas, la ventana se abre a todo el rango sembrado',
+    vD.apuntes > 500, JSON.stringify(vD));
+  t.check('y retrocede a los meses de la siembra',
+    String(vD.desde) < '2026-09-01', JSON.stringify(vD));
+  t.eq('ya no hay nada reconocido como sembrado', vD.sembrados, 0);
+
+  // Pero NO se presentan como medicion: entran como supuestos y se declaran.
+  t.check('aun asi se declaran como supuestos, no como lectura',
+    vD.supuestos === desnudas, `supuestos=${vD.supuestos} vs ${desnudas}`);
+  const ind10 = ((r.body.hojas || []).find((h) => h.nombre === 'Indicador') || {}).filas || [];
+  t.check('y el documento avisa de cuantas son',
+    ind10.some((x) => /origen supuesto/i.test(String(x.Concepto))
+      && String(x.Valor).includes(String(vD.supuestos))),
+    JSON.stringify(ind10.find((x) => /origen supuesto/i.test(String(x.Concepto)))));
+  t.eq('la suma sigue cerrando', vD.apuntes + vD.sembrados + vD.descartados, vD.total);
+
+  // ===================================================================
+  t.section('REC 11. Que las dos marcas discrepen es una senal, no un detalle');
+  // ===================================================================
+  // Mientras las dos digan lo mismo, que falle una no deja pasar nada. Que
+  // empiecen a discrepar significa que una se esta degradando, y hay que verlo
+  // mientras todavia queda la otra.
+  m = await montarProduccion([['g_juntos', 8]]);
+  const mixtas = fake.ensureSheet(acc.HOJA).grid;
+  let rotas = 0;
+  for (let i = 1; i < mixtas.length && rotas < 5; i += 1) {
+    if (String(mixtas[i][7]).toLowerCase() === 'demo') { mixtas[i][6] = 'Chrome'; rotas += 1; }
+  }
+  hoja.invalidarTodo();
+  t.eq('se degradan cinco filas: dicen demo por origen y no por agente', rotas, 5);
+
+  r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
+  const vX = r.body.indicador.ventanaDeRegistro;
+  t.eq('se detectan las cinco discrepancias', vX.marcasEnDesacuerdo, 5);
+  t.eq('y la ventana deja de darse por fiable', vX.fiable, false);
+  t.eq('asi que el indicador no se declara medible', r.body.indicador.medible, false);
+  t.check('pero esas filas SIGUEN quedando fuera, porque la otra marca aguanta',
+    vX.sembrados > 500, JSON.stringify(vX));
+  const ind11 = ((r.body.hojas || []).find((h) => h.nombre === 'Indicador') || {}).filas || [];
+  t.check('y el documento lo dice como lo que es: una marca degradandose',
+    ind11.some((x) => /no coinciden/i.test(String(x.Concepto))
+      && /degradando/i.test(String(x.Valor))),
+    JSON.stringify(ind11.map((x) => x.Concepto).slice(0, 6)));
+
+  // ===================================================================
   t.section('REC 6. Sin ficha de campo no hay indicador, y se dice');
   // ===================================================================
   // ES EL ESTADO DE PRODUCCION HOY: la hoja SeguimientoCampo ni siquiera existe.
