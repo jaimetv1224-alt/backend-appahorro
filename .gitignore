@@ -10,3 +10,8 @@ uploads/
 juntago-backend.zip
 # Salida de la auditoria de pantallas, se regenera en cada pasada.
 test/auditoria-pantallas.json
+
+# Foto de cuantas comprobaciones aporta cada suite cuando todo sale limpio.
+# Sirve para avisar si una suite deja de ejecutar bloques sin lanzar ningun
+# error. Es local a cada equipo: se regenera sola en la primera corrida buena.
+test/.cobertura-base.json

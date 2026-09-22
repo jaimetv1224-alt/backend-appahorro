@@ -77,6 +77,7 @@ const SUITES = [
 
   for (const [nombre, run] of SUITES) {
     process.stdout.write(`\n\x1b[1m\x1b[36m########## ${nombre} ##########\x1b[0m\n`);
+    t.suite(nombre);
     try {
       await run();
     } catch (err) {

@@ -10,6 +10,16 @@ const state = {
   // cuando habia cuatro esperando dos lineas mas abajo. Sin esto, arreglar el
   // primero y ver la bateria en verde da una seguridad que no existe.
   abortadas: [],
+  // Cuantas comprobaciones aporto cada suite en ESTA corrida. Se compara con lo
+  // que aporto la ultima vez que todo salio limpio, y se avisa si baja.
+  //
+  // El aviso de suite abortada no cubre el caso peor: una suite que deja de
+  // ejecutar bloques SIN lanzar nada (un `return` que se cuela, una condicion
+  // que se vuelve falsa, un bucle que no entra). Eso no revienta, no sale en
+  // rojo, y la bateria dice OK con veinte comprobaciones menos. Contarlas es lo
+  // unico que lo enseña.
+  suite: '',
+  porSuite: new Map(),
 };
 
 function section(name) {
@@ -17,8 +27,15 @@ function section(name) {
   process.stdout.write(`\n\x1b[1m--- ${name} ---\x1b[0m\n`);
 }
 
+/** Empieza una suite. Sirve para contar cuanto aporto cada una. */
+function suite(name) {
+  state.suite = name;
+  if (!state.porSuite.has(name)) state.porSuite.set(name, 0);
+}
+
 function record(ok, title, detail) {
   state.results.push({ section: state.section, title, ok, detail });
+  if (state.suite) state.porSuite.set(state.suite, (state.porSuite.get(state.suite) || 0) + 1);
   if (ok) {
     process.stdout.write(`  \x1b[32mOK\x1b[0m   ${title}\n`);
   } else {
@@ -58,8 +75,32 @@ function statusIn(title, res, expectedList) {
 }
 
 /** Una suite murio a medias: lo que venia detras no llego a ejecutarse. */
-function abortada(suite, ultimaSeccion, error) {
-  state.abortadas.push({ suite, ultimaSeccion, error });
+function abortada(suiteNombre, ultimaSeccion, error) {
+  state.abortadas.push({ suite: suiteNombre, ultimaSeccion, error });
+}
+
+const fs = require('fs');
+const path = require('path');
+const BASE = path.resolve(__dirname, '.cobertura-base.json');
+
+/** Lo que aporto cada suite la ultima vez que la bateria salio limpia. */
+function leerBase() {
+  try {
+    return JSON.parse(fs.readFileSync(BASE, 'utf8'));
+  } catch (e) {
+    return null;   // primera corrida en este equipo: todavia no hay con que comparar
+  }
+}
+
+/**
+ * Guarda la foto SOLO si la corrida fue impecable. Guardarla tras una corrida
+ * con fallas o abortos congelaria como normal una cobertura ya degradada, que
+ * es justo lo que se quiere detectar.
+ */
+function guardarBase() {
+  try {
+    fs.writeFileSync(BASE, `${JSON.stringify(Object.fromEntries(state.porSuite), null, 2)}\n`, 'utf8');
+  } catch (e) { /* si no se puede escribir, se sigue: es una ayuda, no un requisito */ }
 }
 
 function summary() {
@@ -78,6 +119,27 @@ function summary() {
     }
     process.stdout.write('\n');
   }
+  // Suites que aportaron MENOS que la ultima vez que todo salio limpio. Una
+  // suite puede dejar de ejecutar bloques sin lanzar nada, y entonces no hay
+  // rojo ninguno: solo faltan comprobaciones que nadie echa de menos.
+  const base = leerBase();
+  const menguadas = [];
+  if (base) {
+    for (const [nombre, antes] of Object.entries(base)) {
+      const ahora = state.porSuite.get(nombre);
+      if (ahora === undefined || ahora < antes) menguadas.push({ nombre, antes, ahora: ahora || 0 });
+    }
+  }
+  if (menguadas.length) {
+    process.stdout.write(`\n\x1b[31m\x1b[1mCOBERTURA A LA BAJA\x1b[0m\n`);
+    process.stdout.write('  Estas suites ejecutaron MENOS comprobaciones que la ultima vez que\n');
+    process.stdout.write('  la bateria salio limpia. Puede que ya no esten corriendo todo.\n');
+    for (const m of menguadas) {
+      process.stdout.write(`    - ${m.nombre}: ${m.ahora} ahora, ${m.antes} antes\n`);
+    }
+    process.stdout.write('\n');
+  }
+
   process.stdout.write(`  Pruebas: ${total}   \x1b[32mOK: ${passed}\x1b[0m   \x1b[31mFALLAS: ${failed}\x1b[0m\n`);
   if (failed) {
     process.stdout.write(`\n\x1b[31mFallas:\x1b[0m\n`);
@@ -86,7 +148,12 @@ function summary() {
     }
   }
   process.stdout.write(`\x1b[1m===============================================\x1b[0m\n`);
-  return failed;
+
+  // La foto de referencia solo se actualiza si TODO salio bien. Guardarla tras
+  // una corrida degradada haria que la degradacion pasara a ser lo normal.
+  if (!failed && !state.abortadas.length && !menguadas.length) guardarBase();
+
+  return failed + menguadas.length;
 }
 
-module.exports = { section, check, eq, near, status, statusIn, summary, abortada, state };
+module.exports = { section, suite, check, eq, near, status, statusIn, summary, abortada, state };
