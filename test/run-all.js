@@ -80,8 +80,13 @@ const SUITES = [
     try {
       await run();
     } catch (err) {
+      // La suite murio aqui. Lo que venia detras NO se ejecuto, asi que hay que
+      // decirlo bien fuerte: si no, se arregla el fallo que se ve, la bateria
+      // sale verde y los que estaban dos secciones mas abajo siguen ahi.
+      const ultima = t.state.section;
       t.section(`${nombre} (ERROR)`);
       t.check('la bateria termino sin excepciones', false, `${err.message}\n${err.stack}`);
+      t.abortada(nombre, ultima, err.message);
     }
   }
 

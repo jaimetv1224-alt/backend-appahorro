@@ -4,6 +4,12 @@ const state = {
   section: '',
   results: [],
   failures: [],
+  // Suites que murieron a medias. Importa mucho mas de lo que parece: cuando
+  // una suite lanza, las secciones que venian detras NO se ejecutan, asi que el
+  // numero de fallas deja de ser el numero de problemas. Se puede leer "1 falla"
+  // cuando habia cuatro esperando dos lineas mas abajo. Sin esto, arreglar el
+  // primero y ver la bateria en verde da una seguridad que no existe.
+  abortadas: [],
 };
 
 function section(name) {
@@ -51,11 +57,27 @@ function statusIn(title, res, expectedList) {
   return ok;
 }
 
+/** Una suite murio a medias: lo que venia detras no llego a ejecutarse. */
+function abortada(suite, ultimaSeccion, error) {
+  state.abortadas.push({ suite, ultimaSeccion, error });
+}
+
 function summary() {
   const total = state.results.length;
   const failed = state.failures.length;
   const passed = total - failed;
   process.stdout.write(`\n\x1b[1m=================== RESUMEN ===================\x1b[0m\n`);
+  if (state.abortadas.length) {
+    process.stdout.write(`\n\x1b[31m\x1b[1mEJECUCION INCOMPLETA\x1b[0m\n`);
+    process.stdout.write('  El numero de fallas NO es el numero de problemas: estas suites\n');
+    process.stdout.write('  murieron a medias y lo que venia detras no llego a ejecutarse.\n');
+    for (const a of state.abortadas) {
+      process.stdout.write(`    - ${a.suite}\n`);
+      process.stdout.write(`      murio en: ${a.ultimaSeccion || '(antes de la primera seccion)'}\n`);
+      process.stdout.write(`      motivo:   ${a.error}\n`);
+    }
+    process.stdout.write('\n');
+  }
   process.stdout.write(`  Pruebas: ${total}   \x1b[32mOK: ${passed}\x1b[0m   \x1b[31mFALLAS: ${failed}\x1b[0m\n`);
   if (failed) {
     process.stdout.write(`\n\x1b[31mFallas:\x1b[0m\n`);
@@ -67,4 +89,4 @@ function summary() {
   return failed;
 }
 
-module.exports = { section, check, eq, near, status, statusIn, summary, state };
+module.exports = { section, check, eq, near, status, statusIn, summary, abortada, state };
