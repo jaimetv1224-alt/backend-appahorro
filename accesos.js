@@ -169,6 +169,34 @@ function resumirAccesos(filas = []) {
  */
 const ORIGENES_REALES = Object.freeze(['login', 'vuelta']);
 const ORIGEN_SEMBRADO = 'demo';
+const COL_ORIGEN = 7;
+
+/**
+ * Que la columna Origen siga estando donde se cree.
+ *
+ * Hace falta porque la lista blanca sola no basta, y el agujero esta en el
+ * sitio menos visible: `accesoDesdeFila` convierte una marca AUSENTE en
+ * 'login', que es un origen real y por tanto pasa la lista blanca. Ese valor
+ * por defecto existe por una razon buena (las filas anteriores a que se creara
+ * la columna son todas inicios de sesion), pero "ausente" tambien es lo que se
+ * ve cuando alguien borra o mueve una columna de la hoja a mano. O sea que el
+ * backfill historico y el desplazamiento de columna producen el MISMO valor, y
+ * uno es legitimo y el otro deja entrar lo sembrado por la puerta de al lado.
+ *
+ * La cabecera los separa: una fila vieja es una fila corta en una hoja cuya
+ * cabecera sigue diciendo 'Origen' en su sitio; una columna movida es una
+ * cabecera que ya no lo dice.
+ *
+ * Dato de la base real a 22 de septiembre de 2026: las 844 filas traen marca
+ * explicita (821 demo, 21 vuelta, 2 login) y ninguna vacia. El valor por
+ * defecto ya no cubre ninguna fila de verdad, asi que hoy solo puede dispararse
+ * por un error.
+ */
+function cabeceraCorrecta(filaCabecera) {
+  const puesto = (filaCabecera || [])[COL_ORIGEN];
+  return (puesto || '').toString().trim().toLowerCase()
+    === CABECERA[COL_ORIGEN].toLowerCase();
+}
 
 /** La fila tal como se guarda en la hoja. */
 function filaDeAcceso(email, ua, ip, fecha = new Date().toISOString(), origen = 'login') {
@@ -198,13 +226,16 @@ function accesoDesdeFila(row) {
     sistema: row[3] || 'desconocido',
     navegador: row[4] || 'desconocido',
     ip: row[5] || '',
-    // Las filas anteriores a esta columna son todas de inicio de sesion
-    origen: (row[7] || 'login').toString().trim().toLowerCase(),
+    // Las filas anteriores a esta columna son todas de inicio de sesion.
+    // OJO: quien use esto para MEDIR el uso tiene que comprobar antes que la
+    // cabecera sigue diciendo 'Origen' en su sitio (cabeceraCorrecta). Si no,
+    // una columna movida se lee aqui como 'login' y pasa por entrada real.
+    origen: (row[COL_ORIGEN] || 'login').toString().trim().toLowerCase(),
   };
 }
 
 module.exports = {
   HOJA, CABECERA, MINUTOS_DE_SESION, interpretarNavegador, franjaHoraria,
   horaEnEcuador, resumirAccesos, filaDeAcceso, accesoDesdeFila,
-  ORIGENES_REALES, ORIGEN_SEMBRADO,
+  ORIGENES_REALES, ORIGEN_SEMBRADO, COL_ORIGEN, cabeceraCorrecta,
 };

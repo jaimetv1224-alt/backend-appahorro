@@ -413,6 +413,51 @@ module.exports = async function run() {
     JSON.stringify(g7.filter((g) => g.DIGITALIZADA === 'si').map((x) => x.Grupo)));
 
   // ===================================================================
+  t.section('REC 8. Una columna movida no se lee como "inicio de sesion"');
+  // ===================================================================
+  // El agujero que quedaba despues de la lista blanca, y estaba en el sitio
+  // menos visible. El lector convierte una marca AUSENTE en 'login', que es un
+  // origen real y por tanto pasa la lista blanca. Ese valor por defecto existe
+  // por una razon buena (las filas anteriores a que se creara la columna son
+  // todas inicios de sesion), pero "ausente" es TAMBIEN lo que se ve cuando
+  // alguien mueve o borra la columna en la hoja. Los dos casos producen el
+  // mismo valor vacio: uno es legitimo y el otro deja entrar lo sembrado por
+  // la puerta de al lado. La cabecera es lo unico que los separa.
+  m = await montarProduccion([['g_juntos', 8]]);
+
+  const hojaAcc = fake.ensureSheet(acc.HOJA);
+  // Se vacia la marca de TODO (como si la columna ya no cayera ahi) y ademas
+  // se estropea la cabecera, que es lo que delata el desplazamiento.
+  for (let i = 1; i < hojaAcc.grid.length; i += 1) hojaAcc.grid[i][7] = '';
+  hojaAcc.grid[0][7] = 'Comentario';
+  hoja.invalidarTodo();
+
+  r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
+  t.status('el instrumento responde', r, 200);
+  t.eq('la ventana NO se da por fiable', r.body.indicador.ventanaDeRegistro.fiable, false);
+  t.check('y se nombra el problema como lo que es',
+    (r.body.indicador.ventanaDeRegistro.marcasDesconocidas || [])
+      .includes('columna-origen-desplazada'),
+    JSON.stringify(r.body.indicador.ventanaDeRegistro.marcasDesconocidas));
+  t.eq('el indicador no se declara medible', r.body.indicador.medible, false);
+
+  const g8 = ((r.body.hojas || []).find((h) => h.nombre === 'Grupos') || {}).filas || [];
+  t.check('ningun grupo se da por digitalizado',
+    g8.every((g) => g.DIGITALIZADA !== 'si'),
+    JSON.stringify(g8.filter((g) => g.DIGITALIZADA === 'si').map((x) => x.Grupo)));
+
+  // El contraste: con la cabecera en su sitio, una fila vieja SIN marca sigue
+  // contando como inicio de sesion. El backfill historico no se rompe.
+  hojaAcc.grid[0][7] = acc.CABECERA[7];
+  hoja.invalidarTodo();
+  r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
+  t.eq('con la cabecera correcta, la ventana vuelve a ser fiable',
+    r.body.indicador.ventanaDeRegistro.fiable, true);
+  t.check('y las filas viejas sin marca cuentan como entradas reales',
+    r.body.indicador.ventanaDeRegistro.apuntes > 100,
+    JSON.stringify(r.body.indicador.ventanaDeRegistro));
+
+  // ===================================================================
   t.section('REC 6. Sin ficha de campo no hay indicador, y se dice');
   // ===================================================================
   // ES EL ESTADO DE PRODUCCION HOY: la hoja SeguimientoCampo ni siquiera existe.

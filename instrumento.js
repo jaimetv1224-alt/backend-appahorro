@@ -109,7 +109,7 @@ module.exports.register = function register(app, ctx) {
   } = ctx;
 
   // La lista blanca de origenes vive en accesos.js, pegada a quien los escribe.
-  const { ORIGENES_REALES, ORIGEN_SEMBRADO } = require('./accesos');
+  const { ORIGENES_REALES, ORIGEN_SEMBRADO, cabeceraCorrecta } = require('./accesos');
 
   const hojaSinFilas = (e) => /Unable to parse range|exceeds grid limits|not found/i
     .test((e && e.message) || '');
@@ -297,13 +297,23 @@ module.exports.register = function register(app, ctx) {
       await asegurarCampo(sheetsClient);
 
       const [
-        usuarios, grupos, vinculos, accesos, ahorros, acciones,
+        usuarios, grupos, vinculos, accesosConCabecera, ahorros, acciones,
         prestamos, pagos, asambleas, campo,
       ] = await leerVarios(sheetsClient, [
-        'Users!A2:I', 'Groups!A2:R', 'UserGroupLinks!A2:F', `${hojaAccesos}!A2:H`,
+        // La hoja de accesos se lee DESDE LA FILA 1: hace falta la cabecera para
+        // saber si la columna Origen sigue en su sitio. Sin eso, una columna
+        // movida se lee como marca vacia, el lector la convierte en 'login' y
+        // pasa la lista blanca.
+        'Users!A2:I', 'Groups!A2:R', 'UserGroupLinks!A2:F', `${hojaAccesos}!A1:H`,
         'Savings!A2:L', 'Acciones!A2:M', 'Loans!A2:K', 'LoanPayments!A2:O',
         'Asambleas!A2:N', `${HOJA_CAMPO}!A2:L`,
       ]);
+
+      // La primera fila es la cabecera, no un acceso.
+      const cabeceraAccesos = accesosConCabecera[0] || [];
+      const accesos = accesosConCabecera.slice(1);
+      // Si no hay ni una fila de datos, da igual donde este la columna.
+      const cabeceraAccesosOk = accesos.length === 0 || cabeceraCorrecta(cabeceraAccesos);
 
       // --- lo sembrado se cuenta y se deja fuera -------------------------
       const sembrado = {
@@ -326,7 +336,13 @@ module.exports.register = function register(app, ctx) {
       // real todo lo demas falla hacia el lado peligroso: si aparece un origen
       // nuevo o la columna se desplaza, lo sembrado pasa por bueno y la ventana
       // de medicion se ensancha sin que nada lo delate.
-      const origenDe = (f) => bajo(f[7]) || 'login';   // vacio = login, como accesoDesdeFila
+      // Una marca vacia puede ser una fila vieja de antes de que existiera la
+      // columna (y entonces es un inicio de sesion, backfill legitimo) o una
+      // columna que ya no esta donde deberia. Las dos producen el MISMO valor
+      // vacio, asi que sin mirar la cabecera son indistinguibles, y una de las
+      // dos deja entrar lo sembrado.
+      const origenDe = (f) => bajo(f[7])
+        || (cabeceraAccesosOk ? 'login' : 'columna-origen-desplazada');
       const esOrigenReal = (f) => ORIGENES_REALES.includes(origenDe(f));
       const marcasDesconocidas = [...new Set(accesos.map(origenDe)
         .filter((o) => o !== ORIGEN_SEMBRADO && !ORIGENES_REALES.includes(o)))];
