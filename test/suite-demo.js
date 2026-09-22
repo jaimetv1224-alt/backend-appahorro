@@ -621,4 +621,65 @@ module.exports = async function run() {
   t.check('y con sus aportes contados',
     !!filaGrupo && Number(filaGrupo['Aportes registrados']) > 0,
     JSON.stringify(filaGrupo && filaGrupo['Aportes registrados']));
+
+  // ===================================================================
+  t.section('DEM 21. Sembrar no se come la cuota de la hoja');
+  // ===================================================================
+  // Las celdas sueltas (valor de accion de cada grupo, cargo de cada socia) se
+  // escribian de una en una: del orden de una llamada por celda. Y como CADA
+  // escritura invalida la memoria del libro entero, ademas obligaba a releerlo
+  // todo otras tantas veces. Sembrar unos datos para ensenar la app podia
+  // dejar a las socias con un 429 durante minutos.
+  // La propiedad que hay que fijar no es un numero absoluto (las cabeceras de
+  // las pestanas nuevas tambien se escriben con update, y eso esta bien): es
+  // que el coste NO crezca con el tamano. Se mide sembrando dos veces, con un
+  // grupo pequeno y con uno tres veces mayor, y comparando.
+  const sembrarCon = async (gid, cuantas) => {
+    preparar();
+    const ee = await baseScenario({ groupId: gid });
+    for (let i = 1; i <= cuantas; i += 1) {
+      seedUser({ nombre: `Socia ${i}`, email: `s${i}@${gid}.test` });
+      seedLink(`s${i}@${gid}.test`, gid, 'member');
+    }
+    // Y varios grupos mas, que son los que multiplicaban las celdas sueltas.
+    for (let g = 1; g <= cuantas / 4; g += 1) {
+      seedUser({ nombre: `Presi ${g}`, email: `p${g}@${gid}.test` });
+      seedGroup({ id: `${gid}X${g}`, nombre: `Caja ${g} de ${gid}`, presidente: `p${g}@${gid}.test` });
+      seedLink(`p${g}@${gid}.test`, `${gid}X${g}`, 'presidente');
+    }
+    hoja.invalidarTodo();
+
+    const u0 = fake.store.calls.update || 0;
+    const b0 = fake.store.calls.valuesBatchUpdate || 0;
+    const res = await post('/api/admin/demo/sembrar', {}, ee.tokens.admin);
+    return {
+      res,
+      updates: (fake.store.calls.update || 0) - u0,
+      lotes: (fake.store.calls.valuesBatchUpdate || 0) - b0,
+    };
+  };
+
+  const pequeno = await sembrarCon('DM21A', 8);
+  const grande = await sembrarCon('DM21B', 24);
+  t.status('siembra bien el pequeno', pequeno.res, 200);
+  t.status('siembra bien el grande', grande.res, 200);
+
+  t.eq('el coste en escrituras de celda NO crece con el tamano',
+    grande.updates, pequeno.updates);
+  t.check('y las celdas sueltas viajan en un solo lote',
+    grande.lotes === 1, `lotes: ${grande.lotes}`);
+  t.check('que son pocas escrituras en total',
+    grande.updates <= 8, `gasto ${grande.updates} escrituras sueltas`);
+
+  // Y lo escrito tiene que ser lo mismo que antes: el valor de accion puesto,
+  // y puesto como numero (si el lote fuera USER_ENTERED podria reinterpretarse).
+  hoja.invalidarTodo();
+  const grupoDM21 = (fake.store.sheets.get('Groups') || { grid: [] }).grid
+    .find((f) => f[0] === 'DM21B');
+  t.check('el valor de accion quedo escrito de verdad',
+    !!grupoDM21 && Number(grupoDM21[15]) > 0,
+    JSON.stringify(grupoDM21 && grupoDM21[15]));
+  t.check('y como numero, no reinterpretado por la hoja',
+    !!grupoDM21 && !Number.isNaN(Number(grupoDM21[15])),
+    JSON.stringify(grupoDM21 && grupoDM21[15]));
 };

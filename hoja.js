@@ -109,13 +109,51 @@ function invalidarTodo() {
  * De quien es la peticion que se esta atendiendo. Lo pone el servidor con
  * `enNombreDe`, para poder repartir la cuota entre las personas en vez de
  * dejar que una sola se la lleve toda.
+ *
+ * ESTO NO PUEDE SER UNA VARIABLE SUELTA DEL MODULO, y lo era. El servidor
+ * atiende varias peticiones a la vez: mientras la de Ana espera a la red, entra
+ * la de Berta y reescribe la variable, asi que el consumo de Ana pasaba a
+ * cobrarsele a Berta. Peor aun con el tope de administrador: si la de en medio
+ * era del admin, la socia heredaba un tope que no le toca, y al reves, un admin
+ * podia quedarse esperando por el tope de una socia. Por eso el dato viaja en
+ * un contexto ligado a la peticion (AsyncLocalStorage), que es lo unico que
+ * sobrevive correctamente a los `await`.
+ *
+ * Se usa `run` y no `enterWith`: `enterWith` contamina el contexto del socket y
+ * con keep-alive puede filtrarse a la peticion siguiente, que es exactamente el
+ * fallo que se viene a cerrar.
  */
-let cuentaActual = '';
-let cuentaEsAdmin = false;
-const enNombreDe = (cuenta, esAdmin) => {
-  cuentaActual = (cuenta || '').toString().toLowerCase();
-  cuentaEsAdmin = esAdmin === true;
+const { AsyncLocalStorage } = require('node:async_hooks');
+const contexto = new AsyncLocalStorage();
+
+// Canal para los scripts y las tareas que no nacen de una peticion HTTP.
+let cuentaPorDefecto = '';
+let adminPorDefecto = false;
+
+const enNombreDe = (cuenta, esAdmin, fn) => {
+  const normal = (cuenta || '').toString().toLowerCase();
+  const admin = esAdmin === true;
+  if (typeof fn === 'function') {
+    return contexto.run({ cuenta: normal, esAdmin: admin }, fn);
+  }
+  cuentaPorDefecto = normal;
+  adminPorDefecto = admin;
+  return undefined;
 };
+
+/** La cuenta de la peticion en curso, o la de por defecto si no hay ninguna. */
+function cuentaDeLaPeticion() {
+  return contexto.getStore() || { cuenta: cuentaPorDefecto, esAdmin: adminPorDefecto };
+}
+
+/**
+ * El rol real se conoce DESPUES de leer la hoja, no al decodificar el token.
+ * Esto lo corrige dentro del contexto ya abierto, sin abrir otro.
+ */
+function marcarRolReal(esAdmin) {
+  const s = contexto.getStore();
+  if (s) s.esAdmin = esAdmin === true;
+}
 
 /** Limpia y devuelve la ventana del minuto de una cuenta. */
 function ventanaDe(cuenta, ahora) {
@@ -130,8 +168,8 @@ function ventanaDe(cuenta, ahora) {
 async function pedirTurno() {
   if (!(config.maxPorMinuto > 0)) return;
   const inicio = Date.now();
-  const cuenta = cuentaActual;
-  const suTope = cuentaEsAdmin ? config.maxPorAdmin : config.maxPorCuenta;
+  const { cuenta, esAdmin } = cuentaDeLaPeticion();
+  const suTope = esAdmin ? config.maxPorAdmin : config.maxPorCuenta;
   for (;;) {
     const ahora = Date.now();
     while (ventana.length > 0 && ahora - ventana[0] >= 60000) ventana.shift();
@@ -289,6 +327,13 @@ function envolver(cliente) {
   // (`invalidar`), una lectura que viajaba durante una escritura no se guarda,
   // y `__sinCache` sigue saltandose la memoria para quien va a escribir sobre
   // lo que lee.
+  //
+  // CUIDADO CON LA FORMA DE LA CLAVE. `invalidar` reconoce lo que es de este
+  // libro porque la clave EMPIEZA por `${spreadsheetId}|`. La clave de batchGet
+  // empezaba por 'batch::', asi que no la reconocia: ninguna escritura borraba
+  // jamas una entrada de batchGet y el panel del proyecto seguia sirviendo la
+  // foto anterior hasta 12 segundos despues de guardar. Era un acoplamiento a
+  // distancia, de los que no se ven leyendo ninguna de las dos funciones sola.
   if (typeof values.batchGet === 'function') {
     valuesEnvueltos.batchGet = async function batchGet(params, ...resto) {
       const p = params || {};
@@ -296,12 +341,15 @@ function envolver(cliente) {
       const limpio = { ...p };
       delete limpio.__sinCache;
       const clave = [
-        'batch',
         p.spreadsheetId || '',
-        (p.ranges || []).join('|'),
+        'batch',
+        // Los rangos se separan con un caracter que ningun rango contiene, para
+        // que ['A','B'] y ['A|B'] no puedan compartir entrada.
+        (p.ranges || []).join(''),
         p.majorDimension || '',
         p.valueRenderOption || '',
-      ].join('::');
+        p.dateTimeRenderOption || '',
+      ].join('|');
       const ahora = Date.now();
 
       if (config.ttlMs > 0 && !sinCache) {
@@ -365,6 +413,9 @@ function configurar(cambios = {}) {
   if (cambios.esperaMaxMs !== undefined) config.esperaMaxMs = numeroDe(cambios.esperaMaxMs, config.esperaMaxMs);
   if (cambios.reintentos !== undefined) config.reintentos = numeroDe(cambios.reintentos, config.reintentos);
   if (cambios.maxPorCuenta !== undefined) config.maxPorCuenta = numeroDe(cambios.maxPorCuenta, config.maxPorCuenta);
+  // Faltaba: sin esto no habia forma de ejercitar el tope del administrador
+  // desde las pruebas, asi que ese camino no lo comprobaba nadie.
+  if (cambios.maxPorAdmin !== undefined) config.maxPorAdmin = numeroDe(cambios.maxPorAdmin, config.maxPorAdmin);
   return { ...config };
 }
 
@@ -376,6 +427,8 @@ const reiniciarEstadisticas = () => {
 
 module.exports = {
   enNombreDe,
+  cuentaDeLaPeticion,
+  marcarRolReal,
   envolver,
   invalidar,
   invalidarTodo,

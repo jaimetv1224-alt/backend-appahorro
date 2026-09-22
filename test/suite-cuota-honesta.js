@@ -124,4 +124,50 @@ module.exports = async function run() {
   t.check('y los grupos se listan de verdad',
     Array.isArray(r.body.grupos) && r.body.grupos.length > 0,
     JSON.stringify(r.body).slice(0, 140));
+
+  // ===================================================================
+  t.section('QTA 5. La cuota de una socia no se le cobra a otra');
+  // ===================================================================
+  // El freno reparte la cuota por persona, y para eso tiene que saber de quien
+  // es la peticion en curso. Ese dato vivia en una variable suelta del modulo:
+  // mientras la peticion de Ana esperaba a la red, entraba la de Berta y la
+  // pisaba, asi que el consumo de Ana pasaba a cobrarsele a Berta. Con el tope
+  // de administrador era peor: una socia podia heredar un tope que no le toca,
+  // y un administrador quedarse esperando por el de una socia.
+  const dormir = (ms) => new Promise((res) => setTimeout(res, ms));
+  let vioAna = null;
+  let vioBerta = null;
+  let topeAna = null;
+  let topeBerta = null;
+
+  await Promise.all([
+    hoja.enNombreDe('ana@juntago.test', false, async () => {
+      // Se duerme a proposito: aqui es donde entraba la otra peticion.
+      await dormir(30);
+      const suyo = hoja.cuentaDeLaPeticion();
+      vioAna = suyo.cuenta;
+      topeAna = suyo.esAdmin;
+    }),
+    (async () => {
+      await dormir(10);
+      return hoja.enNombreDe('berta@juntago.test', true, async () => {
+        const suyo = hoja.cuentaDeLaPeticion();
+        vioBerta = suyo.cuenta;
+        topeBerta = suyo.esAdmin;
+        await dormir(40);
+      });
+    })(),
+  ]);
+
+  t.eq('Ana sigue siendo Ana despues de esperar a la red', vioAna, 'ana@juntago.test');
+  t.eq('y con su tope de socia, no el de administradora', topeAna, false);
+  t.eq('Berta es Berta', vioBerta, 'berta@juntago.test');
+  t.eq('y con el suyo de administradora', topeBerta, true);
+
+  // Fuera de toda peticion se sigue pudiendo fijar la cuenta, que es como
+  // trabajan los scripts y las tareas que no nacen de una peticion HTTP.
+  hoja.enNombreDe('script@juntago.test', false);
+  t.eq('sin peticion en curso vale la cuenta por defecto',
+    hoja.cuentaDeLaPeticion().cuenta, 'script@juntago.test');
+  hoja.enNombreDe('', false);
 };

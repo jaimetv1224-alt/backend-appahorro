@@ -129,24 +129,33 @@ async function requireAuth(req, res, next) {
   // administrador de la plataforma va con su propio tope, mas alto: sus
   // pantallas agregan todo y con el de una socia no le alcanzaba ni para dar
   // una vuelta al panel.
-  hojaEnNombreDe(email, req.user.role === 'admin');
-
-  // Si no se puede comprobar (la hoja no responde) se sigue con lo que dice el
-  // token: dejar a todo el mundo fuera por un fallo de lectura seria peor.
-  try {
-    const real = await estadoRealDelUsuario(email);
-    if (real && !real.activo) {
-      return res.status(401).json({
-        message: 'Tu cuenta esta desactivada. Contacta a la directiva de tu grupo.',
-        codigo: 'CUENTA_DESACTIVADA',
-      });
+  // El contexto se abre AQUI y envuelve todo lo que venga detras, incluida la
+  // lectura de comprobacion y el handler entero. Antes se escribia en una
+  // variable del modulo, que la siguiente peticion pisaba durante el primer
+  // `await`: el consumo de una socia se le cobraba a otra.
+  return hojaEnNombreDe(email, req.user.role === 'admin', async () => {
+    // Si no se puede comprobar (la hoja no responde) se sigue con lo que dice el
+    // token: dejar a todo el mundo fuera por un fallo de lectura seria peor.
+    try {
+      const real = await estadoRealDelUsuario(email);
+      if (real && !real.activo) {
+        return res.status(401).json({
+          message: 'Tu cuenta esta desactivada. Contacta a la directiva de tu grupo.',
+          codigo: 'CUENTA_DESACTIVADA',
+        });
+      }
+      // El rol de verdad sale de la hoja, no del token. Si difiere, el tope de
+      // cuota tiene que corregirse dentro del contexto ya abierto.
+      if (real) {
+        req.user.role = real.rol;
+        hojaMarcarRolReal(real.rol === 'admin');
+      }
+    } catch (e) {
+      if (responderSiEsCuota(res, e)) return;
+      console.error('[AUTH] no se pudo comprobar el estado del usuario:', e.message);
     }
-    if (real) req.user.role = real.rol;
-  } catch (e) {
-    if (responderSiEsCuota(res, e)) return;
-    console.error('[AUTH] no se pudo comprobar el estado del usuario:', e.message);
-  }
-  next();
+    return next();
+  });
 }
 
 async function optionalAuth(req, res, next) {
@@ -300,7 +309,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.22-cuota-honesta';
+const BACKEND_VERSION = '2026.09.22-hallazgos-cerrados';
 
 let gobApi = null;
 
@@ -467,7 +476,7 @@ const MONTO_MAXIMO = 100000000;
 // rechazan con 409.
 const crypto = require('crypto');
 const { conBloqueo } = require('./lock');
-const { envolver: envolverHoja, enNombreDe: hojaEnNombreDe } = require('./hoja');
+const { envolver: envolverHoja, enNombreDe: hojaEnNombreDe, marcarRolReal: hojaMarcarRolReal } = require('./hoja');
 const { actualizarFilaPorClave } = require('./escritura');
 const { esDeCuota: errorDeCuota } = require('./hoja');
 

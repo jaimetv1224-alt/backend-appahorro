@@ -560,20 +560,30 @@ module.exports.register = function register(app, ctx) {
       }
 
       // --- a escribir, una vez cada cosa ---------------------------------
-      for (const c of cambiosGrupo) {
-        await sheetsClient.spreadsheets.values.update({
-          spreadsheetId: SPREADSHEET_ID,
+      // Una sola llamada para TODAS las celdas sueltas. Antes eran dos bucles
+      // con una escritura por celda: del orden de 266 llamadas, y cada una
+      // invalida la memoria del libro entero, asi que ademas obligaba a releer
+      // todo lo demas 266 veces. Sembrar unos datos para ensenar la app se
+      // comia la cuota de la hoja y podia dejar a las socias con un 429.
+      //
+      // OJO: en batchUpdate el valueInputOption va DENTRO de resource, no
+      // arriba como en update. Fuera de sitio, Google lo ignora y aplica
+      // USER_ENTERED, que reinterpreta las celdas (un 15 puede volver
+      // formateado como fecha).
+      const celdas = [
+        ...cambiosGrupo.map((c) => ({
           range: `Groups!${letraDeColumna(c.col + 1)}${c.fila}`,
-          valueInputOption: 'RAW',
-          resource: { values: [[c.valor]] },
-        });
-      }
-      for (const c of cambiosRol) {
-        await sheetsClient.spreadsheets.values.update({
-          spreadsheetId: SPREADSHEET_ID,
+          values: [[c.valor]],
+        })),
+        ...cambiosRol.map((c) => ({
           range: `UserGroupLinks!D${c.fila}`,
-          valueInputOption: 'RAW',
-          resource: { values: [[c.rol]] },
+          values: [[c.rol]],
+        })),
+      ];
+      if (celdas.length) {
+        await sheetsClient.spreadsheets.values.batchUpdate({
+          spreadsheetId: SPREADSHEET_ID,
+          resource: { valueInputOption: 'RAW', data: celdas },
         });
       }
       const anexar = async (rango, filas) => {

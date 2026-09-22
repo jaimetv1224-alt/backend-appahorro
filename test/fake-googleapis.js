@@ -205,7 +205,8 @@ function clearValues(range) {
 const sheetsApi = {
   spreadsheets: {
     get: async ({ spreadsheetId }) => ({
-      data: {
+      // Leer la ESTRUCTURA del libro tambien gasta cuota y no se contaba.
+      data: (store.calls.estructura = (store.calls.estructura || 0) + 1) && {
         spreadsheetId,
         sheets: [...store.sheets.entries()].map(([title, s]) => ({
           properties: {
@@ -286,6 +287,28 @@ const sheetsApi = {
         const body = params.requestBody || params.resource || {};
         const r = writeValues(params.range, body.values);
         return { data: { updatedRange: r.updatedRange, updatedRows: r.updatedRows } };
+      },
+
+      // Varias celdas sueltas en UNA llamada. El emulador no lo tenia, asi que
+      // el codigo que lo usara habria reventado en las pruebas sin decir por
+      // que. Cada rango pasa por quizaFallar('update', ...) para que un fallo
+      // inyectado sobre una celda concreta siga funcionando.
+      batchUpdate: async (params) => {
+        await latencia();
+        const body = params.requestBody || params.resource || {};
+        const datos = body.data || [];
+        for (const d of datos) quizaFallar('update', d.range);
+        store.calls.valuesBatchUpdate = (store.calls.valuesBatchUpdate || 0) + 1;
+        const responses = datos.map((d) => {
+          const r = writeValues(d.range, d.values);
+          return { updatedRange: r.updatedRange, updatedRows: r.updatedRows };
+        });
+        return {
+          data: {
+            totalUpdatedRows: responses.reduce((s, r) => s + (r.updatedRows || 0), 0),
+            responses,
+          },
+        };
       },
 
       append: async (params) => {

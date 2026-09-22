@@ -66,6 +66,9 @@ const SUITES = [
   ['Reconstruccion de la produccion (indicador real)', require('./suite-reconstruccion-produccion')],
   // La ULTIMA de todas: inyecta fallos de cuota a proposito en varias hojas.
   ['Cuota agotada: se dice, no se devuelven ceros', require('./suite-cuota-honesta')],
+  // Enciende la memoria de hoja.js a proposito (la bateria corre con ttlMs 0)
+  // y la restaura en un finally, como suite-produccion.
+  ['Memoria de lotes tras escribir', require('./suite-memoria-batch')],
 ];
 
 (async () => {
