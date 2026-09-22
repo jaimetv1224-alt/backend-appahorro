@@ -355,9 +355,21 @@ module.exports.register = function register(app, ctx) {
       // escribia las dos marcas. Asi que hoy ninguna fila sembrada puede estar
       // sin marca. Esto es el cinturon por si eso deja de ser cierto.)
       const rastroDeSiembra = (f) => String(f[6] || '').toLowerCase().includes(MARCA_DEMO);
-      const origenDe = (f) => bajo(f[7])
-        || (rastroDeSiembra(f) ? ORIGEN_SEMBRADO
-          : (cabeceraAccesosOk ? 'login' : 'columna-origen-desplazada'));
+      // MANDA LO SEMBRADO. Si cualquiera de las dos marcas dice que la fila es
+      // de la demostracion, queda fuera, venga la senal de donde venga.
+      //
+      // Antes mandaba la columna de origen y eso dejaba un hueco por el lado
+      // que no se ve: una fila sembrada cuya marca de origen se hubiera
+      // corrompido a un valor real ('vuelta') entraba como entrada de verdad,
+      // con su rastro "[demo]" delante y sin que nadie lo mirara. Asi la regla
+      // falla siempre hacia el lado conservador: como mucho deja fuera una
+      // entrada real, que estrecha la ventana y hace parecer MENOS medido de lo
+      // que hay, nunca mas.
+      const origenDe = (f) => {
+        if (rastroDeSiembra(f)) return ORIGEN_SEMBRADO;
+        return bajo(f[7])
+          || (cabeceraAccesosOk ? 'login' : 'columna-origen-desplazada');
+      };
       const esOrigenReal = (f) => ORIGENES_REALES.includes(origenDe(f));
       const marcasDesconocidas = [...new Set(accesos.map(origenDe)
         .filter((o) => o !== ORIGEN_SEMBRADO && !ORIGENES_REALES.includes(o)))];
@@ -405,7 +417,14 @@ module.exports.register = function register(app, ctx) {
         // el uso si se calcula; lo que no se puede es presentar ese resultado
         // como una medicion, y de eso se encarga `medible` mas abajo. Si se
         // mezclaran, el modo demostracion dejaria de ensenar nada.
-        fiable: marcasDesconocidas.length === 0 && marcasEnDesacuerdo === 0,
+        // Que las marcas discrepen ya NO tumba la ventana. Con "manda lo
+        // sembrado", los dos sentidos posibles de la discrepancia excluyen la
+        // fila igual, asi que la cifra no cambia: lo que cambia es en que se
+        // apoya, porque esas filas se clasificaron con una marca en vez de dos.
+        // Eso es un supuesto mas debil, y a un supuesto se le declara, no se le
+        // responde callandose. Callarse aqui seria negarse a publicar por algo
+        // que no altera ningun numero.
+        fiable: marcasDesconocidas.length === 0,
         marcasDesconocidas,
         // El reparto COMPLETO de las filas, para que la aritmetica del documento
         // cierre sola y nadie tenga que deducirla restando. Restar invita al
@@ -668,12 +687,12 @@ module.exports.register = function register(app, ctx) {
                + 'verificacion ante el INCYT. Para el informe hay que generarlo sin ellos.',
         }] : []),
         ...(ventana.marcasEnDesacuerdo > 0 ? [{
-          Concepto: 'ATENCION: las dos marcas de lo sembrado no coinciden',
+          Concepto: 'Aviso: las dos marcas de lo sembrado no coinciden',
           Valor: `${ventana.marcasEnDesacuerdo} filas de la hoja de accesos tienen una marca de `
-               + 'demostracion y la otra no. Lo sembrado se reconoce por dos rastros '
-               + 'independientes y mientras digan lo mismo, que falle uno no deja pasar nada. '
-               + 'Que discrepen significa que uno se esta degradando, y conviene arreglarlo '
-               + 'mientras todavia queda el otro. No se afirma nada sobre el uso hasta entonces.',
+               + 'demostracion y la otra no. Quedan fuera igualmente, porque basta con que una '
+               + 'lo diga, asi que ninguna cifra de este documento cambia por ello. Lo que '
+               + 'cambia es en que se apoya: esas filas se clasificaron con una marca en vez de '
+               + 'dos. Conviene arreglarlo mientras todavia queda la otra.',
         }] : []),
         ...(ventana.supuestos > 0 ? [{
           Concepto: 'Aviso: entradas con el origen supuesto',

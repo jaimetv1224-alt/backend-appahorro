@@ -67,9 +67,12 @@ module.exports = async function run() {
   // en la columna de origen y "[demo]" dentro del UserAgent. Sin la segunda,
   // esta suite no estaria reconstruyendo la produccion sino una version mas
   // facil de ella.
-  const entrar = (email, fechaIso, origen) => fake.ensureSheet(acc.HOJA).grid
-    .push([fechaIso, email, 'movil', 'Android', 'Chrome', '1.1.1.1',
-      origen === 'demo' ? 'Chrome [demo]' : 'UA', origen]);
+  const entrar = (email, fechaIso, origen) => fake.ensureSheet(acc.HOJA).grid.push(
+    origen === 'demo'
+      // La fila sembrada se pide al modulo que siembra de verdad, no se copia:
+      // tres suites la escribieron a mano y las tres se dejaron una marca.
+      ? require('../demo').filaDeAccesoSembrado(email, fechaIso)
+      : [fechaIso, email, 'movil', 'Android', 'Chrome', '1.1.1.1', 'UA', origen]);
 
   const aportar = (email, gid, monto, fecha, id, descripcion) => fake.ensureSheet('Savings').grid.push([
     email, gid, monto, fecha, 'mensual', descripcion, 'confirmado',
@@ -383,7 +386,11 @@ module.exports = async function run() {
   const accesos = fake.ensureSheet(acc.HOJA).grid;
   let cambiadas = 0;
   for (const f of accesos) {
-    if (String(f[7]).toLowerCase() === 'demo') { f[7] = 'sincronizacion'; cambiadas += 1; }
+    if (String(f[7]).toLowerCase() === 'demo') {
+      f[7] = 'sincronizacion';
+      f[6] = 'Chrome';   // y sin rastro, o quedarian clasificadas por la otra marca
+      cambiadas += 1;
+    }
   }
   hoja.invalidarTodo();
   t.check('se disfrazaron las entradas sembradas', cambiadas > 500, `${cambiadas}`);
@@ -593,15 +600,38 @@ module.exports = async function run() {
   r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
   const vX = r.body.indicador.ventanaDeRegistro;
   t.eq('se detectan las cinco discrepancias', vX.marcasEnDesacuerdo, 5);
-  t.eq('y la ventana deja de darse por fiable', vX.fiable, false);
-  t.eq('asi que el indicador no se declara medible', r.body.indicador.medible, false);
-  t.check('pero esas filas SIGUEN quedando fuera, porque la otra marca aguanta',
+  // La discrepancia NO tumba la ventana: con "manda lo sembrado" los dos
+  // sentidos posibles excluyen la fila igual, asi que ninguna cifra cambia.
+  // Callarse por algo que no altera ningun numero seria negarse a publicar sin
+  // motivo; lo que corresponde es declararlo.
+  t.eq('la ventana sigue siendo fiable, porque ninguna cifra cambia', vX.fiable, true);
+  t.check('y esas filas SIGUEN quedando fuera, porque basta con que una marca lo diga',
     vX.sembrados > 500, JSON.stringify(vX));
   const ind11 = ((r.body.hojas || []).find((h) => h.nombre === 'Indicador') || {}).filas || [];
-  t.check('y el documento lo dice como lo que es: una marca degradandose',
+  t.check('y el documento lo declara, diciendo que ninguna cifra cambia por ello',
     ind11.some((x) => /no coinciden/i.test(String(x.Concepto))
-      && /degradando/i.test(String(x.Valor))),
+      && /ninguna cifra/i.test(String(x.Valor))),
     JSON.stringify(ind11.map((x) => x.Concepto).slice(0, 6)));
+
+  // Y el hueco que cierra "manda lo sembrado": una fila sembrada cuya marca de
+  // origen se corrompa a un valor REAL. Antes entraba como entrada de verdad,
+  // con su rastro "[demo]" delante y sin que nadie lo mirara.
+  m = await montarProduccion([['g_juntos', 8]]);
+  const alReves = fake.ensureSheet(acc.HOJA).grid;
+  let corrompidas = 0;
+  for (let i = 1; i < alReves.length; i += 1) {
+    if (String(alReves[i][7]).toLowerCase() === 'demo') { alReves[i][7] = 'vuelta'; corrompidas += 1; }
+  }
+  hoja.invalidarTodo();
+  t.check('se corrompen las marcas de origen a un valor REAL', corrompidas > 500, `${corrompidas}`);
+
+  r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
+  const vC = r.body.indicador.ventanaDeRegistro;
+  t.check('el rastro del agente las mantiene fuera de todas formas',
+    vC.sembrados === corrompidas, JSON.stringify(vC));
+  t.check('la ventana no se ensancha hacia los meses de la siembra',
+    String(vC.desde) >= '2026-09-01', JSON.stringify(vC));
+  t.eq('y las discrepancias se cuentan todas', vC.marcasEnDesacuerdo, corrompidas);
 
   // ===================================================================
   t.section('REC 6. Sin ficha de campo no hay indicador, y se dice');

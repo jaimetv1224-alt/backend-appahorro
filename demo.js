@@ -107,6 +107,25 @@ const soloFecha = (iso) => String(iso).slice(0, 10);
 module.exports.MARCA = MARCA;
 module.exports.PREFIJO = PREFIJO;
 
+/**
+ * Una fila de acceso sembrada, tal como la escribe la siembra de verdad.
+ *
+ * Existe para que las PRUEBAS la usen en vez de armarla a mano. Tres suites
+ * distintas la escribian a mano y las tres se dejaron la segunda marca, cada
+ * una copiando el atajo de la anterior: los datos de prueba se escriben una vez
+ * y se copian, asi que un atajo comodo se propaga a cada suite nueva sin que
+ * nadie vuelva a mirarlo. Mientras salgan de aqui, no pueden ir por detras de
+ * lo que escribe la siembra.
+ */
+function filaDeAccesoSembrado(email, fechaIso, aparato = ['movil', 'Android', 'Chrome']) {
+  return [
+    fechaIso, (email || '').toString().trim().toLowerCase(),
+    aparato[0], aparato[1], aparato[2],
+    '190.0.0.1', `${aparato[2]} ${MARCA}`, 'demo',
+  ];
+}
+module.exports.filaDeAccesoSembrado = filaDeAccesoSembrado;
+
 module.exports.register = function register(app, ctx) {
   const {
     getSheetsClient, SPREADSHEET_ID, normalizeEmailKey, normalizeGroupKey,
