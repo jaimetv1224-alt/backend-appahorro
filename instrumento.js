@@ -348,6 +348,11 @@ module.exports.register = function register(app, ctx) {
         .filter((o) => o !== ORIGEN_SEMBRADO && !ORIGENES_REALES.includes(o)))];
 
       const accesosR = incluirDemo ? accesos : accesos.filter(esOrigenReal);
+      // Solo cuentan como supuestos si la cabecera esta bien: si no lo esta, ya
+      // quedaron fuera por 'columna-origen-desplazada'.
+      const supuestos = cabeceraAccesosOk
+        ? accesos.filter((f) => !bajo(f[7])).length
+        : 0;
 
       // Desde cuando y hasta cuando hay registro de entradas de verdad. Sin
       // esto, la condicion de uso se lee como una medicion cuando en realidad
@@ -371,6 +376,12 @@ module.exports.register = function register(app, ctx) {
         // mezclaran, el modo demostracion dejaria de ensenar nada.
         fiable: marcasDesconocidas.length === 0,
         marcasDesconocidas,
+        // Cuantos de esos apuntes tienen el origen SUPUESTO en vez de leido.
+        // Una fila anterior a que existiera la columna se cuenta como inicio de
+        // sesion, y es lo correcto porque asi lo documenta quien las escribio,
+        // pero es un supuesto y no puede quedar escondido dentro de una cifra
+        // que el INCYT va a leer como medicion. Se cuenta y se declara aparte.
+        supuestos,
       };
 
       // --- gente ----------------------------------------------------------
@@ -616,6 +627,14 @@ module.exports.register = function register(app, ctx) {
           Concepto: 'AVISO',
           Valor: 'Este documento INCLUYE datos de demostracion. NO sirve como medio de '
                + 'verificacion ante el INCYT. Para el informe hay que generarlo sin ellos.',
+        }] : []),
+        ...(ventana.supuestos > 0 ? [{
+          Concepto: 'Aviso: entradas con el origen supuesto',
+          Valor: `${ventana.supuestos} de los ${ventana.apuntes} apuntes no traen marca de `
+               + 'origen. Son anteriores a que existiera esa columna y se cuentan como inicio '
+               + 'de sesion, que es lo que documenta quien las escribio, pero es un SUPUESTO y '
+               + 'no una lectura. Si esa diferencia importa para el informe, la decision es de '
+               + 'la direccion del proyecto y no de este programa.',
         }] : []),
         ...(ventana.marcasDesconocidas.length > 0 ? [{
           Concepto: 'ATENCION: el registro de entradas trae marcas desconocidas',

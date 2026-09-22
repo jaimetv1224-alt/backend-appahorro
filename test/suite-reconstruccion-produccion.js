@@ -457,6 +457,20 @@ module.exports = async function run() {
     r.body.indicador.ventanaDeRegistro.apuntes > 100,
     JSON.stringify(r.body.indicador.ventanaDeRegistro));
 
+  // Pero NO se esconden dentro de la cifra. Contarlas como inicio de sesion es
+  // correcto (asi lo documenta quien las escribio) y a la vez es un SUPUESTO,
+  // no una lectura. Meter un supuesto dentro de un numero que el INCYT va a
+  // leer como medicion es la clase de cosa que nadie detecta despues.
+  t.check('pero se declara cuantas llevan el origen supuesto',
+    r.body.indicador.ventanaDeRegistro.supuestos > 100,
+    JSON.stringify(r.body.indicador.ventanaDeRegistro));
+  const ind8 = ((r.body.hojas || []).find((h) => h.nombre === 'Indicador') || {}).filas || [];
+  t.check('y el documento lo dice, con el numero y de quien es la decision',
+    ind8.some((x) => /origen supuesto/i.test(String(x.Concepto))
+      && /SUPUESTO/.test(String(x.Valor))
+      && /direccion del proyecto/i.test(String(x.Valor))),
+    JSON.stringify(ind8.map((x) => x.Concepto).slice(0, 6)));
+
   // ===================================================================
   t.section('REC 6. Sin ficha de campo no hay indicador, y se dice');
   // ===================================================================
