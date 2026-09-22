@@ -540,7 +540,12 @@ module.exports.register = function register(app, ctx) {
       // SeguimientoCampo que grupos son CAYC, 0 de 0 no es "no cumple la meta",
       // es "todavia no se ha decidido que se mide".
       const hayDenominador = denominador > 0;
-      const medible = hayDenominador && sinMedir === 0;
+      // Y con datos sembrados dentro NUNCA es medible, aunque salgan las cuentas.
+      // Las entradas sembradas arrancan en junio de 2025, asi que contarlas hace
+      // que la ventana de registro parezca cubrir mas de un ano y la condicion de
+      // uso pase a parecer comprobada. Es el mismo camino por el que estuve a
+      // punto de reportar un cero falso, solo que por la otra puerta.
+      const medible = hayDenominador && sinMedir === 0 && !incluirDemo;
 
       const socializados = filasGrupos.filter((g) => g['Socializacion (fecha)']).length;
       const capacitados = filasGrupos.filter((g) => g['Capacitacion (fecha)']).length;
@@ -563,18 +568,25 @@ module.exports.register = function register(app, ctx) {
                + 'entran en el indicador. Mientras tanto este documento sirve como diagnostico, '
                + 'no como medio de verificacion.',
         }] : []),
-        ...(medible || !hayDenominador ? [] : [{
+        // El aviso de los datos sembrados va ANTES que el de "sin medir": si el
+        // documento se genero con datos inventados dentro, eso es lo primero que
+        // tiene que saber quien lo abra, y lo demas ya da igual.
+        ...(incluirDemo ? [{
+          Concepto: 'AVISO',
+          Valor: 'Este documento INCLUYE datos de demostracion. NO sirve como medio de '
+               + 'verificacion ante el INCYT. Para el informe hay que generarlo sin ellos.',
+        }] : []),
+        // Y este solo cuando de verdad hay grupos sin evaluar. Colgarlo de
+        // `!medible` lo disparaba tambien con los datos sembrados dentro, y
+        // entonces anunciaba "0 de 10 grupos no se pueden evaluar", que no
+        // significa nada.
+        ...(sinMedir > 0 && hayDenominador ? [{
           Concepto: 'ATENCION: el indicador NO se puede afirmar todavia',
           Valor: `${sinMedir} de ${denominador} grupos no se pueden evaluar porque el registro `
                + `de entradas a la app empieza el ${ventana.desde || 'sin datos'} y sus socias `
                + 'estaban dadas de alta desde antes. Lo que hicieran antes de esa fecha no quedo '
                + 'anotado en ninguna parte, asi que no es un cero: es un dato que falta. '
                + 'El porcentaje de abajo es una COTA INFERIOR, no la medicion.',
-        }]),
-        ...(incluirDemo ? [{
-          Concepto: 'AVISO',
-          Valor: 'Este documento INCLUYE datos de demostracion. NO sirve como medio de '
-               + 'verificacion ante el INCYT. Para el informe hay que generarlo sin ellos.',
         }] : []),
         ...(!incluirDemo && filasSembrado > 0 ? [{
           Concepto: 'Base del calculo',
@@ -597,7 +609,15 @@ module.exports.register = function register(app, ctx) {
           Concepto: 'Brecha hasta la meta',
           Valor: porcentaje >= META ? '0' : `${Math.round((META - porcentaje) * 10) / 10} %`,
         }] : []),
-        { Concepto: 'Registro de entradas: desde', Valor: ventana.desde || 'no hay ningun apunte' },
+        {
+          Concepto: 'Registro de entradas: desde',
+          Valor: (ventana.desde || 'no hay ningun apunte')
+            // Las entradas sembradas van de junio de 2025 en adelante. Si se
+            // cuentan, la ventana parece cubrir mas de un ano y la condicion de
+            // uso pasa a parecer MEDIBLE cuando no lo es: justo el camino por el
+            // que un hueco de instrumentacion vuelve a leerse como un cero.
+            + (incluirDemo ? ' (CONTAMINADA: incluye entradas sembradas, no sirve para juzgar el uso)' : ''),
+        },
         { Concepto: 'Registro de entradas: hasta', Valor: ventana.hasta || '-' },
         { Concepto: 'Registro de entradas: dias cubiertos', Valor: ventana.dias },
         { Concepto: 'Grupos a los que se socializo', Valor: `${socializados} de ${denominador}` },

@@ -259,6 +259,20 @@ module.exports = async function run() {
     String((r.body.hojas || [])[0] && (r.body.hojas || [])[0].nombre) === 'Indicador',
     JSON.stringify((r.body.hojas || []).map((h) => h.nombre)));
 
+  // Y lo mas fino: con lo sembrado dentro, la VENTANA DE REGISTRO tambien queda
+  // contaminada. Las entradas sembradas arrancan en 2025, asi que la condicion
+  // de uso pasaria a parecer comprobada y el documento afirmaria sobre el uso de
+  // las socias apoyandose en datos inventados. Es el mismo error del cero falso,
+  // entrando por la otra puerta.
+  t.eq('con lo sembrado, el indicador NO se declara medible',
+    r.body.indicador.medible, false);
+  t.eq('ni se afirma si cumple la meta', r.body.indicador.cumple, null);
+  const filaDesde = (((r.body.hojas || [])
+    .find((h) => h.nombre === 'Indicador') || {}).filas || [])
+    .find((x) => /Registro de entradas: desde/.test(String(x.Concepto)));
+  t.check('y la ventana se marca como contaminada',
+    /CONTAMINADA/.test(String(filaDesde && filaDesde.Valor)), JSON.stringify(filaDesde));
+
   // ===================================================================
   t.section('REC 4. Cuanto dinero propio hay de verdad en los diez grupos');
   // ===================================================================
