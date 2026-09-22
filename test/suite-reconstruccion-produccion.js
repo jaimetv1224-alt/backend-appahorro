@@ -392,6 +392,13 @@ module.exports = async function run() {
   t.check('ninguna de las 821 disfrazadas se cuenta como real',
     r.body.indicador.ventanaDeRegistro.apuntes < 100,
     JSON.stringify(r.body.indicador.ventanaDeRegistro));
+  // Y con las 821 fuera de las tres categorias buenas, la suma sigue cerrando:
+  // van a parar a "sin clasificar", que es donde tienen que estar.
+  const v7 = r.body.indicador.ventanaDeRegistro;
+  t.eq('la suma cierra tambien cuando hay marcas raras',
+    v7.apuntes + v7.sembrados + v7.descartados, v7.total);
+  t.check('y las disfrazadas caen en "sin clasificar"',
+    v7.descartados > 500, JSON.stringify(v7));
   t.check('y la ventana no se ensancha hacia atras',
     String(r.body.indicador.ventanaDeRegistro.desde) >= '2026-09-01',
     JSON.stringify(r.body.indicador.ventanaDeRegistro));
@@ -470,6 +477,22 @@ module.exports = async function run() {
       && /SUPUESTO/.test(String(x.Valor))
       && /direccion del proyecto/i.test(String(x.Valor))),
     JSON.stringify(ind8.map((x) => x.Concepto).slice(0, 6)));
+
+  // LA ARITMETICA TIENE QUE CERRAR. En cuanto hay supuestos o marcas sin
+  // clasificar, deducir una cifra restando deja de dar lo que uno cree, y un
+  // parrafo que invita a esa resta es una contradiccion delante de quien
+  // revise el documento con los dedos. Por eso se publican las tres cifras.
+  const v8 = r.body.indicador.ventanaDeRegistro;
+  t.eq('total = reales + sembradas + sin clasificar',
+    v8.apuntes + v8.sembrados + v8.descartados, v8.total);
+  t.check('y los supuestos son un subconjunto de las reales, no un cuarto grupo',
+    v8.supuestos <= v8.apuntes, JSON.stringify(v8));
+  t.check('el documento publica el reparto completo',
+    ind8.some((x) => /como se reparten/i.test(String(x.Concepto))
+      && String(x.Valor).includes(`${v8.total} filas en total`)
+      && String(x.Valor).includes(`${v8.apuntes} entradas reales`)
+      && String(x.Valor).includes(`${v8.sembrados} sembradas`)),
+    JSON.stringify(ind8.find((x) => /como se reparten/i.test(String(x.Concepto)))));
 
   // ===================================================================
   t.section('REC 6. Sin ficha de campo no hay indicador, y se dice');

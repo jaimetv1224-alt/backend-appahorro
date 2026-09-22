@@ -353,6 +353,8 @@ module.exports.register = function register(app, ctx) {
       const supuestos = cabeceraAccesosOk
         ? accesos.filter((f) => !bajo(f[7])).length
         : 0;
+      const total = accesos.length;
+      const sembrados = accesos.filter((f) => origenDe(f) === ORIGEN_SEMBRADO).length;
 
       // Desde cuando y hasta cuando hay registro de entradas de verdad. Sin
       // esto, la condicion de uso se lee como una medicion cuando en realidad
@@ -376,6 +378,13 @@ module.exports.register = function register(app, ctx) {
         // mezclaran, el modo demostracion dejaria de ensenar nada.
         fiable: marcasDesconocidas.length === 0,
         marcasDesconocidas,
+        // El reparto COMPLETO de las filas, para que la aritmetica del documento
+        // cierre sola y nadie tenga que deducirla restando. Restar invita al
+        // error: en cuanto hay supuestos o marcas sin clasificar, "las
+        // restantes" deja de ser el numero que uno cree.
+        total,
+        sembrados,
+        descartados: total - sembrados - diasDeAcceso.length,
         // Cuantos de esos apuntes tienen el origen SUPUESTO en vez de leido.
         // Una fila anterior a que existiera la columna se cuenta como inicio de
         // sesion, y es lo correcto porque asi lo documenta quien las escribio,
@@ -656,6 +665,13 @@ module.exports.register = function register(app, ctx) {
                + 'estaban dadas de alta desde antes. Lo que hicieran antes de esa fecha no quedo '
                + 'anotado en ninguna parte, asi que no es un cero: es un dato que falta. '
                + 'El porcentaje de abajo es una COTA INFERIOR, no la medicion.',
+        }] : []),
+        ...(ventana.total > 0 ? [{
+          Concepto: 'Registro de entradas: como se reparten las filas',
+          Valor: `${ventana.total} filas en total = ${ventana.apuntes} entradas reales `
+               + `(${ventana.supuestos} de ellas con el origen supuesto) `
+               + `+ ${ventana.sembrados} sembradas + ${ventana.descartados} sin clasificar. `
+               + 'Las tres cifras se publican para que la suma cierre sin tener que restar.',
         }] : []),
         ...(!incluirDemo && filasSembrado > 0 ? [{
           Concepto: 'Base del calculo',
