@@ -300,7 +300,7 @@ const parseMoney = (value) => {
 // El porton de seguridad responde 401 a cualquier ruta desconocida, asi que
 // preguntar por un endpoint nuevo no distingue "existe" de "no existe": lo unico
 // que lo prueba es que el propio servidor declare su version.
-const BACKEND_VERSION = '2026.09.22-instrumento';
+const BACKEND_VERSION = '2026.09.22-ventana-medicion';
 
 let gobApi = null;
 
@@ -1816,9 +1816,17 @@ async function getUserManagedGroupIds(userEmail) {
     });
     const links = linksResp.data.values || [];
 
+    // El Estado del vinculo (col E) manda. Sin este filtro, una fila dada de
+    // baja que conservara su cargo seguiria dando gobierno sobre el grupo del
+    // que la persona acaba de salir: canManageGroup diria que si y todos los
+    // assertGroupManager pasarian. Hoy ningun camino produce esa combinacion
+    // (la baja por gobernanza degrada el cargo a 'member' y retirar-vinculo se
+    // niega ante la directiva), pero es la linea mas barata que lo garantiza.
     return new Set(
         links
-            .filter((row) => normalize(row[0]) === email && GROUP_ADMIN_ROLES.has(normalize(row[3])))
+            .filter((row) => normalize(row[0]) === email
+                && GROUP_ADMIN_ROLES.has(normalize(row[3]))
+                && linkIsActive(row))
             .map((row) => (row[1] || '').toString().trim())
             .filter(Boolean)
     );
@@ -4238,6 +4246,9 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
         failed: 0,
         errors: [],
         avisos: [],
+        // Quien queda viva en mas de un grupo despues de esta carga. No es un
+        // error: es lo que hay que mirar antes de dar la carga por buena.
+        enDosGrupos: [],
     };
 
     // ---------------------------------------------------------------- PASO 1
@@ -4269,6 +4280,12 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
     const filaDeVinculo = new Map();
     const rolDeVinculo = new Map();
     const cargosTomados = new Map();
+    // Correo -> grupos en los que ya esta viva esa persona. Pertenecer a dos
+    // cajas es legitimo y no se puede deducir lo contrario desde un archivo,
+    // asi que esto no bloquea nada: sirve para AVISARLO en el mismo segundo en
+    // que ocurre. Las once socias que quedaron en dos grupos a la vez estuvieron
+    // meses asi porque la pantalla que las cargo no dijo ni una palabra.
+    const activosPorPersona = new Map();
     if (linkGroups) {
         const sheetsClient = await getSheetsClient();
         const enlacesResp = await sheetsClient.spreadsheets.values.get({
@@ -4286,6 +4303,9 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
             rolDeVinculo.set(clave, rolHoy);
             if (linkIsActive(fila)) {
                 dentroPorGrupo.set(gid, (dentroPorGrupo.get(gid) || 0) + 1);
+                const quien = normalize(fila[0]);
+                if (!activosPorPersona.has(quien)) activosPorPersona.set(quien, new Set());
+                activosPorPersona.get(quien).add(gid);
                 if (CARGOS_DIRECTIVA.has(rolHoy)) {
                     if (!cargosTomados.has(gid)) cargosTomados.set(gid, new Set());
                     cargosTomados.get(gid).add(rolHoy);
@@ -4505,8 +4525,30 @@ const importUsersFromRows = async (rows, { linkGroups = false } = {}) => {
             );
         }
 
+        // Si esta persona ya esta viva en OTRO grupo, se crea el vinculo igual
+        // (dos cajas es legitimo) pero se dice, con los dos nombres delante.
+        const yaEstaEn = [...(activosPorPersona.get(email) || [])].filter((g) => g !== groupId);
+        if (yaEstaEn.length > 0) {
+            const nombreDe = (g) => {
+                const enc = (groupsLookup && groupsLookup.names.find((n) => n.groupId === g)) || null;
+                return enc ? enc.groupName : g;
+            };
+            summary.enDosGrupos.push({
+                email,
+                entra: nombreDe(groupId),
+                yaEstaba: yaEstaEn.map(nombreDe),
+            });
+            summary.avisos.push(
+                `Fila ${rowNumber}: ${email} entra en "${nombreDe(groupId)}" pero sigue activa en `
+                + `"${yaEstaEn.map(nombreDe).join('", "')}". Se crea igual, porque una socia puede `
+                + 'estar en dos cajas. Si fue un traslado, hay que darla de baja en el grupo viejo.'
+            );
+        }
+
         vinculos.add(clave);
         dentroPorGrupo.set(groupId, dentro + 1);
+        if (!activosPorPersona.has(email)) activosPorPersona.set(email, new Set());
+        activosPorPersona.get(email).add(groupId);
         filaDeVinculo.set(clave, null);
         rolDeVinculo.set(clave, rolFinal);
         ocupar(groupId, rolFinal);
@@ -4948,27 +4990,44 @@ app.post('/api/desvincular-usuario-grupo', bloquear(() => 'hoja:UserGroupLinks')
 async function movimientoEnGrupo(sheetsClient, email, groupId) {
     const e = normalizeEmailKey(email);
     const g = normalizeGroupKey(groupId);
-    const contar = async (rango, colEmail, colGrupo) => {
+    // El movimiento SEMBRADO no es movimiento. Contarlo como tal dejaba un
+    // agujero feo: sembrar datos para ensenar la app CONGELABA los errores de
+    // carga, porque cualquier enlace equivocado pasaba a tener "movimiento" y
+    // el administrador ya no podia deshacer su propio error. Paso de verdad con
+    // las once socias que quedaron enlazadas a dos grupos a la vez.
+    const esDemo = (v) => (v == null ? '' : v).toString().trim().toLowerCase().startsWith('demo_');
+    const contar = async (rango, colEmail, colGrupo, colId) => {
         try {
             const r = await sheetsClient.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID, range: rango,
             });
-            return (r.data.values || []).filter((f) => (
+            const suyas = (r.data.values || []).filter((f) => (
                 normalizeEmailKey(f[colEmail]) === e && normalizeGroupKey(f[colGrupo]) === g
-            )).length;
+            ));
+            const sembradas = suyas.filter((f) => esDemo(f[colId])).length;
+            return { real: suyas.length - sembradas, demo: sembradas };
         } catch (err) {
             // Que la pestana no exista es normal en un libro recien creado.
             // Cualquier OTRO fallo sube: ante la duda no se retira a nadie.
-            if (/Unable to parse range|exceeds grid limits/i.test(err && err.message)) return 0;
+            if (/Unable to parse range|exceeds grid limits/i.test(err && err.message)) {
+                return { real: 0, demo: 0 };
+            }
             throw err;
         }
     };
     const [ahorros, acciones, prestamos] = await Promise.all([
-        contar('Savings!A2:L', 0, 1),
-        contar('Acciones!A2:M', 0, 1),
-        contar('Loans!A2:K', 1, 2),
+        contar('Savings!A2:L', 0, 1, 10),
+        contar('Acciones!A2:M', 0, 1, 11),
+        contar('Loans!A2:K', 1, 2, 0),
     ]);
-    return { ahorros, acciones, prestamos, total: ahorros + acciones + prestamos };
+    const demo = ahorros.demo + acciones.demo + prestamos.demo;
+    return {
+        ahorros: ahorros.real,
+        acciones: acciones.real,
+        prestamos: prestamos.real,
+        total: ahorros.real + acciones.real + prestamos.real,
+        sembrado: demo,
+    };
 }
 
 /**
@@ -5035,7 +5094,7 @@ app.post('/api/admin/retirar-vinculo', requireAdmin, bloquear(() => 'hoja:UserGr
                 success: false,
                 codigo: 'TIENE_MOVIMIENTO',
                 movimiento: mov,
-                message: `Esta persona ya tiene movimiento en el grupo (${mov.ahorros} ahorro(s), `
+                message: `Esta persona ya tiene movimiento REAL en el grupo (${mov.ahorros} ahorro(s), `
                        + `${mov.acciones} accion(es), ${mov.prestamos} prestamo(s)), asi que sacarla `
                        + 'de aqui es cosa de la directiva del grupo, no del administrador de la plataforma.',
             });
@@ -5521,7 +5580,11 @@ app.get('/api/admin/participantes', requireAdmin, async (req, res) => {
                 const gid = normalizeGroupKey(g[0]);
                 const miembros = vinculos
                     .filter((v) => normalizeGroupKey(v[1]) === gid)
-                    .filter((v) => (v[4] || 'activo').toString().toLowerCase() !== 'inactivo')
+                    // El mismo predicado que usa el resto del backend. Antes esta
+                    // pantalla solo daba de baja la palabra exacta 'inactivo', asi
+                    // que una socia que salio por gobernanza (Estado 'retirada')
+                    // seguia contando AQUI y no contaba en ninguna otra parte.
+                    .filter((v) => linkIsActive(v))
                     .map((v) => {
                         const correo = normalizeEmailKey(v[0]);
                         const base = datosUsuario[correo] || { nombre: correo, correo, estado: 'sin cuenta' };

@@ -60,6 +60,10 @@ const SUITES = [
   // sesion se escriben sin esperar; en medio ponian roja a la suite siguiente.
   ['Instrumento de seguimiento (INCYT)', require('./suite-instrumento')],
   ['Correos repetidos en la hoja', require('./suite-metricas-duplicados')],
+  // Va la ULTIMA: monta una base de 152 socias y ~1.700 filas para medir el
+  // indicador sobre la forma real de produccion. Construye su propio escenario
+  // de cero, asi que no puede ir en medio de otra suite.
+  ['Reconstruccion de la produccion (indicador real)', require('./suite-reconstruccion-produccion')],
 ];
 
 (async () => {

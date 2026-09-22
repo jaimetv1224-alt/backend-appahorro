@@ -319,6 +319,20 @@ module.exports.register = function register(app, ctx) {
       const asambleasR = real(asambleas, ASA.id);
       const accesosR = incluirDemo ? accesos : accesos.filter((f) => bajo(f[7]) !== 'demo');
 
+      // Desde cuando y hasta cuando hay registro de entradas de verdad. Sin
+      // esto, la condicion de uso se lee como una medicion cuando en realidad
+      // puede estar preguntandole a un cuaderno que empezo la semana pasada.
+      const diasDeAcceso = accesosR
+        .map((f) => dia(f[0]))
+        .filter(Boolean)
+        .sort();
+      const ventana = {
+        desde: diasDeAcceso[0] || null,
+        hasta: diasDeAcceso[diasDeAcceso.length - 1] || null,
+        apuntes: diasDeAcceso.length,
+        dias: new Set(diasDeAcceso).size,
+      };
+
       // --- gente ----------------------------------------------------------
       const persona = new Map();
       usuarios.forEach((u) => {
@@ -396,14 +410,38 @@ module.exports.register = function register(app, ctx) {
         const idsPrestamo = new Set(susPrestamos.map((f) => (f[LOAN.id] || '').toString().trim()));
         const susPagos = pagosR.filter((f) => idsPrestamo.has((f[PAGO.loan] || '').toString().trim()));
 
+        // LA VENTANA DE MEDICION. El registro de entradas no existe desde
+        // siempre: se programo el 3 de septiembre de 2026 y su primer apunte
+        // real es del 16. Preguntar "¿ha entrado alguna vez?" a un registro que
+        // empieza despues de que la socia se diera de alta no da un NO: da un
+        // NO SE SABE. Contarlo como NO haria que el informe diera por inexistente
+        // el trabajo de las socias durante todo el periodo anterior.
+        const altaMasVieja = socias
+          .map((s) => dia(s.desde))
+          .filter(Boolean)
+          .sort()[0] || null;
+        const usanMedible = !!ventana.desde && (!altaMasVieja || ventana.desde <= altaMasVieja);
+
         const cumple = {
           directiva: cargos.has('presidente') && cargos.has('tesorero'),
-          usan: socias.length > 0 && entraron.length * 2 >= socias.length,
+          usan: usanMedible ? (socias.length > 0 && entraron.length * 2 >= socias.length) : null,
           dinero: (susAhorros.length + susAcciones.length + susPrestamos.length) > 0,
         };
-        const digitalizada = enLaApp && CONDICIONES.every((c) => cumple[c.clave]);
+        // Tres estados, no dos: si, no, y sin medir. Un grupo con alguna
+        // condicion sin medir NO cuenta como digitalizado (no se puede afirmar)
+        // pero tampoco se le apunta como fallo.
+        const hayIndeterminada = CONDICIONES.some((c) => cumple[c.clave] === null);
+        const digitalizada = enLaApp && !hayIndeterminada
+          && CONDICIONES.every((c) => cumple[c.clave] === true);
+        const veredicto = !enLaApp ? 'no'
+          : (hayIndeterminada && CONDICIONES.every((c) => cumple[c.clave] !== false)
+            ? 'sin medir'
+            : siNo(digitalizada));
         const leFalta = enLaApp
-          ? CONDICIONES.filter((c) => !cumple[c.clave]).map((c) => c.titulo)
+          ? CONDICIONES.filter((c) => cumple[c.clave] === false).map((c) => c.titulo)
+            .concat(CONDICIONES.filter((c) => cumple[c.clave] === null)
+              .map((c) => `${c.titulo} (SIN MEDIR: el registro de entradas empieza el `
+                + `${ventana.desde || 'sin datos'} y estas socias estaban desde antes)`))
           : ['El grupo todavia no existe en la app'];
 
         filasGrupos.push({
@@ -424,7 +462,8 @@ module.exports.register = function register(app, ctx) {
           'Prestamos otorgados': susPrestamos.length,
           'Pagos con comprobante': susPagos.length,
           'Asambleas registradas': susAsambleas.length,
-          'DIGITALIZADA': siNo(digitalizada),
+          'Uso medible': siNo(usanMedible),
+          'DIGITALIZADA': veredicto,
           'Que le falta': leFalta.join('; '),
           Responsable: (ficha[CAMPO.responsable] || '').toString(),
           Evidencia: (ficha[CAMPO.evidencia] || '').toString(),
@@ -490,28 +529,87 @@ module.exports.register = function register(app, ctx) {
       // --- el indicador ----------------------------------------------------
       const denominador = caycIds.length;
       const numerador = filasGrupos.filter((g) => g.DIGITALIZADA === 'si').length;
+      const sinMedir = filasGrupos.filter((g) => g.DIGITALIZADA === 'sin medir').length;
       const porcentaje = pct(numerador, denominador);
       const META = 50;
+      // Si hay grupos que no se pueden evaluar, el porcentaje NO es el indicador:
+      // es una cota inferior. Decir "0 %" cuando lo que pasa es que falta el dato
+      // convierte un hueco de instrumentacion en un juicio sobre las socias.
+      //
+      // Y sin denominador no hay indicador en absoluto: mientras nadie marque en
+      // SeguimientoCampo que grupos son CAYC, 0 de 0 no es "no cumple la meta",
+      // es "todavia no se ha decidido que se mide".
+      const hayDenominador = denominador > 0;
+      const medible = hayDenominador && sinMedir === 0;
 
       const socializados = filasGrupos.filter((g) => g['Socializacion (fecha)']).length;
       const capacitados = filasGrupos.filter((g) => g['Capacitacion (fecha)']).length;
       const usando = filasGrupos.filter((g) => Number(g['Socias que han entrado']) > 0).length;
       const sinApp = filasGrupos.filter((g) => g['Esta en la app'] === 'no').length;
 
+      // El aviso va en la PRIMERA hoja y en la primera fila. Antes vivia solo en
+      // "Como se calcula", que es la hoja que nadie abre: quien recibiera el
+      // archivo veia el numerador y el porcentaje sin enterarse de que estaban
+      // contando datos sembrados. Un aviso que hay que ir a buscar no es un aviso.
+      const filasSembrado = sembrado.aportes + sembrado.acciones + sembrado.prestamos
+        + sembrado.pagos + sembrado.asambleas + sembrado.entradas;
+
       const filasIndicador = [
+        ...(!hayDenominador ? [{
+          Concepto: 'ATENCION: todavia no hay indicador',
+          Valor: 'Ningun grupo esta marcado como CAYC en la hoja SeguimientoCampo, asi que el '
+               + 'denominador es 0 y no hay nada que calcular. Esto NO significa que la meta no '
+               + 'se cumpla: significa que la direccion del proyecto aun no ha fijado que grupos '
+               + 'entran en el indicador. Mientras tanto este documento sirve como diagnostico, '
+               + 'no como medio de verificacion.',
+        }] : []),
+        ...(medible || !hayDenominador ? [] : [{
+          Concepto: 'ATENCION: el indicador NO se puede afirmar todavia',
+          Valor: `${sinMedir} de ${denominador} grupos no se pueden evaluar porque el registro `
+               + `de entradas a la app empieza el ${ventana.desde || 'sin datos'} y sus socias `
+               + 'estaban dadas de alta desde antes. Lo que hicieran antes de esa fecha no quedo '
+               + 'anotado en ninguna parte, asi que no es un cero: es un dato que falta. '
+               + 'El porcentaje de abajo es una COTA INFERIOR, no la medicion.',
+        }]),
+        ...(incluirDemo ? [{
+          Concepto: 'AVISO',
+          Valor: 'Este documento INCLUYE datos de demostracion. NO sirve como medio de '
+               + 'verificacion ante el INCYT. Para el informe hay que generarlo sin ellos.',
+        }] : []),
+        ...(!incluirDemo && filasSembrado > 0 ? [{
+          Concepto: 'Base del calculo',
+          Valor: `Solo datos reales. Se dejaron fuera ${filasSembrado} filas sembradas para `
+               + 'demostrar el funcionamiento de la app.',
+        }] : []),
         { Concepto: 'Indicador', Valor: 'IN-DIBA-2026-1.2' },
         { Concepto: 'Meta', Valor: 'Porcentaje de las CAYC seleccionadas estan digitalizadas' },
         { Concepto: 'Meta cuantitativa', Valor: `${META} %` },
         { Concepto: 'NUMERADOR (grupos CAYC digitalizados)', Valor: numerador },
         { Concepto: 'DENOMINADOR (total de grupos CAYC)', Valor: denominador },
-        { Concepto: 'RESULTADO', Valor: `${porcentaje} %` },
-        { Concepto: 'Cumple la meta', Valor: siNo(porcentaje >= META) },
-        { Concepto: 'Brecha hasta la meta', Valor: porcentaje >= META ? '0' : `${Math.round((META - porcentaje) * 10) / 10} %` },
+        { Concepto: 'Grupos que NO se pueden evaluar', Valor: sinMedir },
+        {
+          Concepto: 'RESULTADO',
+          Valor: !hayDenominador ? 'sin denominador: falta marcar las CAYC en SeguimientoCampo'
+            : (medible ? `${porcentaje} %` : `${porcentaje} % o mas (sin medir)`),
+        },
+        { Concepto: 'Cumple la meta', Valor: medible ? siNo(porcentaje >= META) : 'sin medir' },
+        ...(medible ? [{
+          Concepto: 'Brecha hasta la meta',
+          Valor: porcentaje >= META ? '0' : `${Math.round((META - porcentaje) * 10) / 10} %`,
+        }] : []),
+        { Concepto: 'Registro de entradas: desde', Valor: ventana.desde || 'no hay ningun apunte' },
+        { Concepto: 'Registro de entradas: hasta', Valor: ventana.hasta || '-' },
+        { Concepto: 'Registro de entradas: dias cubiertos', Valor: ventana.dias },
         { Concepto: 'Grupos a los que se socializo', Valor: `${socializados} de ${denominador}` },
         { Concepto: 'Grupos capacitados', Valor: `${capacitados} de ${denominador}` },
         { Concepto: 'Grupos con alguna socia que ya entro', Valor: `${usando} de ${denominador}` },
         { Concepto: 'CAYC seleccionadas que AUN NO estan en la app', Valor: `${sinApp} de ${denominador}` },
-        { Concepto: 'Socias en los grupos CAYC', Valor: filasNomina.length },
+        // Dos cifras, no una. La nomina lleva una fila por PAREJA grupo-socia,
+        // asi que una persona que pertenece a dos cajas aparece dos veces. Si
+        // se publica ese total como "socias", arreglar un enlace duplicado
+        // mueve la cifra del proyecto y nadie sabe explicar por que bajo.
+        { Concepto: 'Socias en los grupos CAYC', Valor: new Set(filasNomina.map((f) => f.Correo)).size },
+        { Concepto: 'Vinculos socia-grupo (una socia en dos cajas cuenta dos veces)', Valor: filasNomina.length },
         { Concepto: 'Registros de operaciones como evidencia', Valor: filasEvidencias.length },
         { Concepto: 'Fecha del corte', Valor: new Date().toISOString().slice(0, 10) },
       ];
@@ -523,6 +621,15 @@ module.exports.register = function register(app, ctx) {
           Regla: `${c.titulo}. ${c.detalle}`,
         })),
         { Punto: 'Se cumplen todas', Regla: 'Un grupo cuenta como digitalizado solo si cumple las tres. La hoja Grupos dice cual le falta a cada uno.' },
+        {
+          Punto: 'Cuando una condicion no se puede medir',
+          Regla: 'El registro de entradas a la app no existe desde siempre: empieza el '
+               + `${ventana.desde || '(todavia no hay ningun apunte)'} y cubre ${ventana.dias} dia(s). `
+               + 'Para un grupo cuyas socias se dieron de alta ANTES de esa fecha, la pregunta '
+               + '"¿ha entrado alguna vez?" no tiene respuesta: lo que hicieran antes no quedo '
+               + 'anotado. Esos grupos salen como "sin medir", nunca como "no". Un hueco de '
+               + 'instrumentacion no es una ausencia de actividad.',
+        },
         {
           Punto: 'Datos de demostracion',
           Regla: incluirDemo
@@ -555,7 +662,16 @@ module.exports.register = function register(app, ctx) {
         archivo: `JuntaGO-instrumento-digitalizacion-${new Date().toISOString().slice(0, 10)}`
           + (incluirDemo ? '-CON-DATOS-DE-DEMOSTRACION' : ''),
         soloDatosReales: !incluirDemo,
-        indicador: { numerador, denominador, porcentaje, meta: META, cumple: porcentaje >= META },
+        indicador: {
+          numerador,
+          denominador,
+          porcentaje,
+          meta: META,
+          cumple: medible ? porcentaje >= META : null,
+          medible,
+          sinMedir,
+          ventanaDeRegistro: ventana,
+        },
         hojas: [
           { nombre: 'Indicador', filas: filasIndicador },
           { nombre: 'Como se calcula', filas: filasRegla },

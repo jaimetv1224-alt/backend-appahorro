@@ -767,4 +767,105 @@ module.exports = async function run() {
   t.check('la fecha con formula entra como texto, con apostrofe delante',
     !!conFormula && (conFormula[2] || '').startsWith("'="),
     `quedo: ${conFormula && conFormula[2]}`);
+
+  // ===================================================================
+  t.section('IMP 26. El movimiento SEMBRADO no congela un error de carga');
+  // ===================================================================
+  // El guarda que protege a las socias (no se retira a quien ya movio dinero)
+  // contaba tambien las filas sembradas para ensenar la app. Efecto real: en
+  // cuanto se sembraban datos, cualquier enlace equivocado quedaba CONGELADO,
+  // porque pasaba a tener "movimiento" y el administrador ya no podia deshacer
+  // su propio error. Es lo que dejo a once socias enlazadas a dos grupos.
+  preparar();
+  e = await baseScenario({ groupId: 'IMP26' });
+  seedUser({ nombre: 'Mal Cargada', email: 'malcargada@juntago.test' });
+  seedUser({ nombre: 'Con Dinero', email: 'condinero@juntago.test' });
+  seedUser({ nombre: 'Presi 26', email: 'presi26@juntago.test' });
+  seedGroup({ id: 'EQUIVOCADO', nombre: 'Grupo equivocado', presidente: 'presi26@juntago.test' });
+  seedLink('presi26@juntago.test', 'EQUIVOCADO', 'presidente');
+  seedLink('malcargada@juntago.test', 'EQUIVOCADO', 'member');
+  seedLink('condinero@juntago.test', 'EQUIVOCADO', 'member');
+
+  const fila = (email, id, desc) => fake.ensureSheet('Savings').grid.push([
+    email, 'EQUIVOCADO', 25, '2026-05-10', 'mensual', desc, 'confirmado',
+    email, 'presi26@juntago.test', '2026-05-10T10:00:00.000Z', id, '',
+  ]);
+  // A la mal cargada solo la "mueve" lo sembrado. A la otra, dinero de verdad.
+  fila('malcargada@juntago.test', 'demo_sav_26_1', 'Aporte mensual [demo]');
+  fila('malcargada@juntago.test', 'demo_sav_26_2', 'Aporte mensual [demo]');
+  fila('condinero@juntago.test', 'sav_real_26', 'Aporte mensual');
+  hoja.invalidarTodo();
+
+  r = await post('/api/admin/retirar-vinculo',
+    { Email: 'malcargada@juntago.test', GroupID: 'EQUIVOCADO' }, e.tokens.admin);
+  t.status('se puede deshacer la carga aunque haya datos sembrados encima', r, 200);
+
+  const trasRetirar = filasDe('UserGroupLinks')
+    .find((f) => f[0] === 'malcargada@juntago.test' && f[1] === 'EQUIVOCADO');
+  t.check('la fila sigue ahi, no se borro', !!trasRetirar, 'la fila desaparecio');
+  t.eq('y queda marcada inactiva', trasRetirar && (trasRetirar[4] || '').toLowerCase(), 'inactivo');
+
+  // Y el guarda de verdad sigue puesto: con dinero real no se retira a nadie.
+  r = await post('/api/admin/retirar-vinculo',
+    { Email: 'condinero@juntago.test', GroupID: 'EQUIVOCADO' }, e.tokens.admin);
+  t.status('con movimiento REAL se sigue negando', r, 409);
+  t.eq('y lo dice con su codigo', r.body && r.body.codigo, 'TIENE_MOVIMIENTO');
+  t.eq('contando el ahorro real', r.body && r.body.movimiento && r.body.movimiento.ahorros, 1);
+
+  const sigueDentro = filasDe('UserGroupLinks')
+    .find((f) => f[0] === 'condinero@juntago.test' && f[1] === 'EQUIVOCADO');
+  t.eq('y esa socia sigue activa en su grupo',
+    sigueDentro && (sigueDentro[4] || '').toLowerCase(), 'activo');
+
+  // ===================================================================
+  t.section('IMP 27. Quedar en dos grupos a la vez se dice, no se calla');
+  // ===================================================================
+  // Pertenecer a dos cajas es legitimo y un archivo no permite deducir lo
+  // contrario, asi que el vinculo se crea. Lo que no puede pasar es que la
+  // pantalla que acaba de hacerlo no diga nada: las once socias que quedaron
+  // en dos grupos estuvieron meses asi porque la carga termino en verde.
+  preparar();
+  e = await baseScenario({ groupId: 'IMP27' });
+  seedUser({ nombre: 'Doble Ana', email: 'doble@juntago.test' });
+  seedUser({ nombre: 'Presi A', email: 'presia@juntago.test' });
+  seedGroup({ id: 'GRUPO-A', nombre: 'Caja del Norte', presidente: 'presia@juntago.test' });
+  seedLink('presia@juntago.test', 'GRUPO-A', 'presidente');
+  seedLink('doble@juntago.test', 'GRUPO-A', 'member');
+  hoja.invalidarTodo();
+
+  r = await importar([
+    { Username: 'Presi B', Email: 'presib@juntago.test', Group: 'Caja del Sur', GroupRole: 'presidente' },
+    { Username: 'Doble Ana', Email: 'doble@juntago.test', Group: 'Caja del Sur', GroupRole: 'member' },
+  ], e.tokens.admin);
+  t.status('la carga responde', r, 200);
+
+  const s27 = (r.body && r.body.summary) || {};
+  t.eq('el vinculo nuevo SI se crea, porque dos cajas es legitimo',
+    filasDe('UserGroupLinks').filter((f) => f[0] === 'doble@juntago.test'
+      && (f[4] || 'activo').toLowerCase() === 'activo').length, 2);
+  t.eq('y se avisa de que queda en dos grupos', (s27.enDosGrupos || []).length, 1);
+
+  const caso = (s27.enDosGrupos || [])[0] || {};
+  t.eq('con el correo de quien es', caso.email, 'doble@juntago.test');
+  t.eq('el grupo en el que entra', caso.entra, 'Caja del Sur');
+  t.eq('y el grupo en el que ya estaba', (caso.yaEstaba || []).join(','), 'Caja del Norte');
+  t.check('el aviso nombra los DOS grupos, no identificadores',
+    (s27.avisos || []).some((a) => /Caja del Sur/.test(a) && /Caja del Norte/.test(a)),
+    JSON.stringify(s27.avisos));
+  t.check('y sugiere que mire si fue un traslado',
+    (s27.avisos || []).some((a) => /traslado/i.test(a)), JSON.stringify(s27.avisos));
+
+  // Quien entra a un solo grupo no genera ruido: el aviso tiene que significar algo.
+  t.check('la presidenta nueva no genera aviso de doble grupo',
+    !(s27.enDosGrupos || []).some((x) => x.email === 'presib@juntago.test'),
+    JSON.stringify(s27.enDosGrupos));
+
+  // NOTA sobre lo que NO hay aqui. Se anadio a getUserManagedGroupIds el filtro
+  // linkIsActive(row), para que un vinculo dado de baja no conserve el gobierno
+  // del grupo. Intente escribir la prueba y NO discrimina: hay una segunda
+  // guarda de pertenencia delante ("No perteneces a este grupo") que ya devuelve
+  // 403 con y sin el filtro. O sea que hoy no existe ninguna diferencia
+  // observable, y una prueba que pasa igual con el arreglo puesto o quitado no
+  // prueba nada. El filtro se queda como defensa en profundidad, declarado como
+  // tal en el comentario del codigo, y sin prueba que finja cubrirlo.
 };
