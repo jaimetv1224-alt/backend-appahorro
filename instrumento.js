@@ -706,6 +706,19 @@ module.exports.register = function register(app, ctx) {
       const usando = filasGrupos.filter((g) => Number(g['Socias que han entrado']) > 0).length;
       const sinApp = filasGrupos.filter((g) => g['Esta en la app'] === 'no').length;
 
+      // DOS POBLACIONES QUE NO SE PUEDEN MEZCLAR: las socias de los grupos CAYC
+      // y las socias de la plataforma. Cuando las CAYC seleccionadas no son los
+      // grupos cargados, la primera cifra es mucho menor que la segunda, y eso
+      // es correcto pero se lee como si faltaran datos. Peor: invita a dividir
+      // una por otra, que es construir un porcentaje con el numerador de una
+      // poblacion y el denominador de otra. Se publican las dos, dichas, y sin
+      // porcentaje entre ellas.
+      const sociasCayc = new Set(filasNomina.map((f) => f.Correo));
+      const sociasPlataforma = new Set();
+      [...porGrupo.values()].forEach((lista) => lista
+        .forEach((x) => { if (x.correo) sociasPlataforma.add(x.correo); }));
+      const sociasFuera = [...sociasPlataforma].filter((c) => !sociasCayc.has(c)).length;
+
       // El aviso va en la PRIMERA hoja y en la primera fila. Antes vivia solo en
       // "Como se calcula", que es la hoja que nadie abre: quien recibiera el
       // archivo veia el numerador y el porcentaje sin enterarse de que estaban
@@ -767,6 +780,17 @@ module.exports.register = function register(app, ctx) {
         });
       }
 
+      if (sociasFuera > 0) {
+        avisos.push({
+          Concepto: 'Aviso: no todas las socias de la plataforma son de grupos CAYC',
+          Valor: `${sociasCayc.size} socias pertenecen a los grupos CAYC de este indicador y `
+               + `${sociasFuera} mas estan en la plataforma en grupos que no son CAYC. Las dos `
+               + 'cifras son correctas y NO comparten denominador: dividir una por otra daria un '
+               + 'porcentaje que mezcla dos poblaciones distintas. Que la primera sea menor no '
+               + 'significa que falten datos, significa que las CAYC seleccionadas y los grupos '
+               + 'cargados en la app no son el mismo conjunto.',
+        });
+      }
       if (caycSinFuente.length > 0) {
         avisos.push({
           Concepto: 'Aviso: el denominador no esta documentado por completo',
@@ -857,7 +881,11 @@ module.exports.register = function register(app, ctx) {
         // asi que una persona que pertenece a dos cajas aparece dos veces. Si
         // se publica ese total como "socias", arreglar un enlace duplicado
         // mueve la cifra del proyecto y nadie sabe explicar por que bajo.
-        { Concepto: 'Socias en los grupos CAYC', Valor: new Set(filasNomina.map((f) => f.Correo)).size },
+        { Concepto: 'Socias en los grupos CAYC', Valor: sociasCayc.size },
+        {
+          Concepto: 'Socias de la plataforma que NO estan en grupos CAYC',
+          Valor: `${sociasFuera} (de ${sociasPlataforma.size} en total en la plataforma)`,
+        },
         { Concepto: 'Vinculos socia-grupo (una socia en dos cajas cuenta dos veces)', Valor: filasNomina.length },
         { Concepto: 'Registros de operaciones como evidencia', Valor: filasEvidencias.length },
         { Concepto: 'Fecha del corte', Valor: new Date().toISOString().slice(0, 10) },

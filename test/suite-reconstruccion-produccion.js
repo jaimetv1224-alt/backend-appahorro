@@ -651,6 +651,120 @@ module.exports = async function run() {
   t.eq('y las discrepancias se cuentan todas', vC.marcasEnDesacuerdo, corrompidas);
 
   // ===================================================================
+  t.section('REC 12. El caso real: las CAYC del Plan NO son los grupos cargados');
+  // ===================================================================
+  // ES LA SITUACION DE VERDAD, y el error mas grave que se puede cometer con
+  // ella. El Plan Integral selecciona once cajas; de esas once, solo Family Bank
+  // y Juntos Crecemos existen en la plataforma. Los otros ocho grupos cargados
+  // NO estan en el Plan con ninguna grafia.
+  //
+  // El error consiste en contar los niveles sobre los DIEZ grupos cargados y
+  // dividir entre ONCE: da 90,9 % de "CAYC seleccionadas digitalizadas" cuando
+  // de esas once hay dos en la app. Numerador de una poblacion, denominador de
+  // otra. Aqui se fija que eso no pueda ocurrir: el instrumento recorre el
+  // conjunto del denominador, asi que todo lo que publica con "de N" sale de las
+  // mismas filas.
+  m = await montarProduccion([['equipo', 23]]);
+
+  // Las once del Plan: nueve que no estan en la app (van con su nombre, sin
+  // groupId) y las dos que si, apuntando al grupo real.
+  const ONCE_DEL_PLAN = [
+    'Santa Rosa 1', 'Carlos Espinoza Central', 'Nueva Esperanza', 'Mujeres al Progreso',
+    'San Lorenzo', 'Renacer', 'Las Palmeras', 'Jesus del Gran Poder', 'Nuevo Horizonte',
+  ];
+  // PRIMERO el estado equivocado, que es el que se da en la practica: la ficha
+  // ya traia los diez grupos cargados marcados como CAYC. Al anadir las once del
+  // Plan el denominador se va a 19 y el indicador se hunde sin que nada lo diga
+  // ... salvo el aviso de la fuente, que es justo para lo que esta.
+  r = await post('/api/admin/seguimiento-campo', {
+    grupos: [
+      ...ONCE_DEL_PLAN.map((nombre) => ({
+        grupo: nombre, esCayc: true,
+        nombreEnElPlan: `Grupo "${nombre}"`,
+        fuenteDeLaSeleccion: 'Plan Integral, seleccion formal, copia del 22/05/2026',
+      })),
+      { groupId: 'g_family', grupo: 'Family Bank', esCayc: true,
+        nombreEnElPlan: 'Grupo "Family Bank"',
+        fuenteDeLaSeleccion: 'Plan Integral, seleccion formal, copia del 22/05/2026' },
+      { groupId: 'g_juntos', grupo: 'Juntos Crecemos', esCayc: true,
+        nombreEnElPlan: 'Grupo "Juntos Crecemos"',
+        fuenteDeLaSeleccion: 'Plan Integral, seleccion formal, copia del 22/05/2026' },
+    ],
+  }, m.e.tokens.admin);
+  t.status('se anotan las once del Plan', r, 200);
+  hoja.invalidarTodo();
+
+  r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
+  t.status('el instrumento responde', r, 200);
+  t.eq('con la ficha sucia el denominador se infla a 19', r.body.indicador.denominador, 19);
+  t.eq('pero el aviso de la fuente delata cuantos no deberian estar',
+    r.body.indicador.caycSinFuenteDocumentada, 8);
+  t.check('y lo dice con su aviso, en vez de dejar el denominador inflado en silencio',
+    ((r.body.hojas || []).find((h) => h.nombre === 'Indicador') || { filas: [] }).filas
+      .some((x) => /denominador no esta documentado/i.test(String(x.Concepto))
+        && /8 de los 19/.test(String(x.Valor))), '');
+
+  // AHORA se corrige: los ocho que no estan en el Plan se desmarcan como CAYC.
+  // No se borran de la ficha, que conserva su rastro de campo: se dejan fuera
+  // del indicador, que es distinto.
+  const AJENOS = ['g_aguinaldo', 'g_banquio', 'g_amanecer', 'g_manos',
+    'g_semilla', 'g_mar', 'g_unidos', 'g_cofrecito'];
+  r = await post('/api/admin/seguimiento-campo', {
+    grupos: AJENOS.map((gid) => ({
+      groupId: gid, esCayc: false,
+      observacion: 'Grupo del proyecto, pero no consta en la seleccion formal del Plan.',
+    })),
+  }, m.e.tokens.admin);
+  t.status('se desmarcan los ocho que no estan en el Plan', r, 200);
+  hoja.invalidarTodo();
+
+  r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
+  t.eq('el denominador son las ONCE seleccionadas, no los diez cargados',
+    r.body.indicador.denominador, 11);
+  t.check('y los ocho siguen en la ficha, con su motivo anotado',
+    (((await get('/api/admin/seguimiento-campo', m.e.tokens.admin)).body.anotados) || [])
+      .filter((x) => AJENOS.includes(x.groupId))
+      .every((x) => x.esCayc === false && /no consta en la seleccion/i.test(x.observacion)),
+    '');
+
+  const g12 = ((r.body.hojas || []).find((h) => h.nombre === 'Grupos') || {}).filas || [];
+  t.eq('y solo se publican esas once filas', g12.length, 11);
+  t.eq('nueve de ellas todavia no estan en la app',
+    g12.filter((g) => g['Esta en la app'] === 'no').length, 9);
+  t.eq('las dos que si son Family Bank y Juntos Crecemos',
+    g12.filter((g) => g['Esta en la app'] === 'si').map((g) => g.Grupo).sort().join(' + '),
+    'Family Bank + Juntos Crecemos');
+  t.check('cada una lleva su nombre del Plan y su fuente',
+    g12.every((g) => String(g['Nombre en el Plan']).length > 0
+      && /22\/05\/2026/.test(String(g['Fuente de la seleccion']))),
+    JSON.stringify(g12[0]));
+  t.eq('ninguna queda sin fuente documentada', r.body.indicador.caycSinFuenteDocumentada, 0);
+
+  // LO QUE IMPIDE EL ERROR: ningun "de 11" puede venir de los diez cargados,
+  // porque todo sale de estas once filas. Los ocho grupos ajenos al Plan no
+  // aparecen aqui, y sus socias se declaran aparte.
+  t.check('la cobertura de socializacion se cuenta sobre las once',
+    /de 11$/.test(String(dato(r, 'Grupos a los que se socializo').Valor)),
+    JSON.stringify(dato(r, 'Grupos a los que se socializo')));
+  t.check('y las CAYC que aun no estan en la app se dicen sobre las once',
+    String(dato(r, 'AUN NO estan en la app').Valor) === '9 de 11',
+    JSON.stringify(dato(r, 'AUN NO estan en la app')));
+
+  const sociasCayc = Number(dato(r, 'Socias en los grupos CAYC').Valor);
+  const fuera = String(dato(r, 'NO estan en grupos CAYC').Valor);
+  t.check('las socias de los grupos CAYC son solo las de esos dos grupos',
+    sociasCayc > 0 && sociasCayc < 40, `${sociasCayc}`);
+  // Y esta es la cifra que el error publicaba como 90,9 %: dos de once, 18,2 %.
+  t.eq('las CAYC seleccionadas que SI estan en la app son 2 de 11',
+    `${11 - 9} de 11`, '2 de 11');
+  t.check('y se declara cuantas socias de la plataforma quedan fuera del indicador',
+    /\d+ \(de 15\d en total/.test(fuera), fuera);
+  t.check('con el aviso de que las dos cifras no comparten denominador',
+    ((r.body.hojas || []).find((h) => h.nombre === 'Indicador') || { filas: [] }).filas
+      .some((x) => /no todas las socias/i.test(String(x.Concepto))
+        && /NO comparten denominador/.test(String(x.Valor))), '');
+
+  // ===================================================================
   t.section('REC 6. Sin ficha de campo no hay indicador, y se dice');
   // ===================================================================
   // ES EL ESTADO DE PRODUCCION HOY: la hoja SeguimientoCampo ni siquiera existe.
