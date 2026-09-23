@@ -114,6 +114,113 @@ module.exports = async function run() {
   t.check('el grupo de prueba sale avisado como sin ficha',
     filasDe(r, 'Grupos sin ficha de campo').some((x) => x.GrupoID === 'NOPE'), '');
 
+  // ---------------------------------------------------------------------
+  // El Plan y la plataforma no llaman igual a la misma caja
+  // ---------------------------------------------------------------------
+  // El Plan usa nombres formales ("Caja de Ahorro Mujeres al Progreso") y la
+  // plataforma los nombres con los que las socias la llaman ("Mi aguinaldo").
+  // Sin poder anotar la correspondencia, una caja que SI esta digitalizada se
+  // contaba como "no esta en la app" solo porque el nombre no coincidia; y
+  // cuadrar la lista obligaba a renombrar grupos en la plataforma, que es tocar
+  // el dato para que encaje con el informe.
+  r = await post('/api/admin/seguimiento-campo', {
+    grupos: [{
+      groupId: 'CAYC2',
+      nombreEnElPlan: 'Caja de Ahorro y Credito Mujeres al Progreso',
+      fuenteDeLaSeleccion: 'Plan Integral, tabla 23',
+    }],
+  }, e.tokens.admin);
+  t.status('se puede anotar como se llama en el Plan', r, 200);
+  hoja.invalidarTodo();
+
+  r = await get('/api/admin/seguimiento-campo', e.tokens.admin);
+  const anotado = ((r.body && r.body.anotados) || []).find((x) => x.groupId === 'CAYC2');
+  t.eq('la ficha devuelve el nombre del Plan',
+    anotado && anotado.nombreEnElPlan, 'Caja de Ahorro y Credito Mujeres al Progreso');
+  t.eq('y de donde sale que es del proyecto',
+    anotado && anotado.fuenteDeLaSeleccion, 'Plan Integral, tabla 23');
+  t.eq('sin haber borrado lo que ya estaba de la socializacion',
+    anotado && anotado.socializacion && anotado.socializacion.fecha, '2026-02-11');
+
+  r = await get('/api/admin/instrumento-digitalizacion', e.tokens.admin);
+  const g2p = filasDe(r, 'Grupos').find((x) => x.GrupoID === 'CAYC2');
+  t.eq('el instrumento publica los DOS nombres en la misma fila',
+    g2p && g2p['Nombre en el Plan'], 'Caja de Ahorro y Credito Mujeres al Progreso');
+  t.eq('y el nombre de la app al lado', g2p && g2p.Grupo, 'Segundo banco');
+  t.eq('con la fuente de la seleccion', g2p && g2p['Fuente de la seleccion'], 'Plan Integral, tabla 23');
+
+  // El denominador es la cifra mas discutida del indicador, asi que cada grupo
+  // tiene que poder decir en que documento consta. Lo que no lo diga, se avisa:
+  // el indicador se calcula igual, pero esa parte hay que creersela.
+  t.eq('se cuenta cuantos CAYC no dicen de donde salen',
+    r.body.indicador.caycSinFuenteDocumentada, 1);
+  t.eq('y se publica cuanto del denominador esta documentado',
+    dato(r, 'Denominador con su fuente documentada'), '1 de 2');
+  t.check('con su aviso, sin dejar de calcular',
+    filasDe(r, 'Indicador').some((x) => /denominador no esta documentado/i.test(String(x.Concepto))),
+    JSON.stringify(filasDe(r, 'Indicador').map((x) => x.Concepto).slice(0, 5)));
+
+  // Y cuando los dos tienen fuente, el aviso desaparece: un aviso que no se
+  // apaga cuando se atiende deja de significar algo.
+  r = await post('/api/admin/seguimiento-campo', {
+    grupos: [{ groupId: 'CAYC1', fuenteDeLaSeleccion: 'Acta de socializacion 001' }],
+  }, e.tokens.admin);
+  t.status('se documenta el que faltaba', r, 200);
+  hoja.invalidarTodo();
+  r = await get('/api/admin/instrumento-digitalizacion', e.tokens.admin);
+  t.eq('ya no queda ninguno sin fuente', r.body.indicador.caycSinFuenteDocumentada, 0);
+  t.check('y el aviso se apaga',
+    !filasDe(r, 'Indicador').some((x) => /denominador no esta documentado/i.test(String(x.Concepto))),
+    JSON.stringify(filasDe(r, 'Indicador').map((x) => x.Concepto).slice(0, 5)));
+
+  // ---------------------------------------------------------------------
+  // La directiva se mide por FUNCION, no por la palabra que use cada grupo
+  // ---------------------------------------------------------------------
+  // No todos los grupos se organizan igual: en los libros que entregaron, unos
+  // tienen Presidenta, otros Lideresa y otros seis Lideres. La condicion pide
+  // presidencia y tesoreria, y funciona porque el cargo llega normalizado, no
+  // porque el grupo escriba esa palabra. Estaba asi desde antes pero SIN
+  // ninguna prueba, o sea que un cambio en la normalizacion lo habria roto en
+  // silencio y el grupo habria dejado de contar sin que nadie supiera por que.
+  preparar();
+  e = await baseScenario({ groupId: 'AUXR' });
+  seedUser({ nombre: 'Lideresa Rosa', email: 'rosa@rol.test' });
+  seedUser({ nombre: 'Tesorera Marta', email: 'marta@rol.test' });
+  seedUser({ nombre: 'Socia Tres', email: 'tres@rol.test' });
+  seedGroup({ id: 'ROLES', nombre: 'Caja con lideresa', presidente: 'rosa@rol.test' });
+  seedLink('rosa@rol.test', 'ROLES', 'Lideresa');
+  seedLink('marta@rol.test', 'ROLES', 'Tesorera');
+  seedLink('tres@rol.test', 'ROLES', 'member');
+  fake.seedSheet(acc.HOJA, [acc.CABECERA]);
+  ['rosa@rol.test', 'marta@rol.test'].forEach((c, i) => entrar(c, `2026-04-0${i + 1}T10:00:00.000Z`));
+  aportar('rosa@rol.test', 'ROLES', 30, '2026-04-05', 'sav_roles_1');
+  hoja.invalidarTodo();
+
+  r = await post('/api/admin/seguimiento-campo', {
+    grupos: [{ groupId: 'ROLES', grupo: 'Caja con lideresa', esCayc: true }],
+  }, e.tokens.admin);
+  t.status('se anota la ficha', r, 200);
+  hoja.invalidarTodo();
+
+  r = await get('/api/admin/instrumento-digitalizacion', e.tokens.admin);
+  const gRol = filasDe(r, 'Grupos').find((x) => x.GrupoID === 'ROLES');
+  t.eq('una Lideresa cuenta como presidencia', gRol && gRol['Presidencia y tesoreria'], 'si');
+  t.eq('y con eso el grupo cumple la condicion de directiva',
+    !/directiva|tesoreria|presidencia/i.test(String(gRol && gRol['Que le falta'])), true);
+  t.eq('el grupo sale digitalizado', gRol && gRol.DIGITALIZADA, 'si');
+
+  // Y el contraste: sin tesoreria no basta, se llame como se llame la cabeza.
+  const rejillaRol = fake.store.sheets.get('UserGroupLinks').grid;
+  const filaMarta = rejillaRol.find((f) => f[0] === 'marta@rol.test' && f[1] === 'ROLES');
+  filaMarta[3] = 'member';
+  hoja.invalidarTodo();
+  r = await get('/api/admin/instrumento-digitalizacion', e.tokens.admin);
+  const gRol2 = filasDe(r, 'Grupos').find((x) => x.GrupoID === 'ROLES');
+  t.eq('sin tesoreria la condicion falla', gRol2 && gRol2['Presidencia y tesoreria'], 'no');
+  t.check('y se dice que le falta la directiva',
+    /directiva|tesoreria|presidencia/i.test(String(gRol2 && gRol2['Que le falta'])),
+    JSON.stringify(gRol2 && gRol2['Que le falta']));
+
   // ===================================================================
   t.section('INS 2. Los datos de demostracion NO cuentan en el indicador');
   // ===================================================================

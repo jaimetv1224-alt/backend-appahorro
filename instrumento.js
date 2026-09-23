@@ -41,12 +41,29 @@ const CABECERA_CAMPO = [
   'GroupID', 'Grupo', 'EsCAYC', 'SocializacionFecha', 'SocializacionAsistentes',
   'CapacitacionFecha', 'CapacitacionAsistentes', 'Responsable', 'Evidencia',
   'Observacion', 'ActualizadoPor', 'ActualizadoEn',
+  // Como se llama esta caja en el Plan Integral, cuando no se llama igual que en
+  // la app. Es la columna que faltaba y sin ella el instrumento no podia decir
+  // la verdad: el Plan usa nombres formales ("Caja de Ahorro Mujeres al
+  // Progreso") y la plataforma los nombres con los que las socias la llaman
+  // ("Mi aguinaldo"). Sin poder anotar la correspondencia, una caja que SI esta
+  // digitalizada se contaba como "no esta en la app" solo porque el nombre no
+  // coincidia, y al reves, cuadrar la lista obligaba a renombrar grupos en la
+  // plataforma, que es tocar el dato para que encaje con el informe.
+  'NombreEnElPlan',
+  // De donde sale que esta caja es del proyecto: el documento, tabla o acta que
+  // lo dice. Sin esto el denominador es una lista que alguien escribio, y con
+  // esto es una lista que se puede comprobar.
+  'FuenteDeLaSeleccion',
 ];
 const CAMPO = {
   id: 0, grupo: 1, esCayc: 2, socFecha: 3, socAsistentes: 4,
   capFecha: 5, capAsistentes: 6, responsable: 7, evidencia: 8,
   observacion: 9, actualizadoPor: 10, actualizadoEn: 11,
+  nombrePlan: 12, fuente: 13,
 };
+// Ultima columna de la hoja, en letra. Se calcula para que anadir un campo mas
+// no obligue a buscar todos los 'A2:L' del modulo, que es como se olvida uno.
+const COL_FIN = String.fromCharCode(65 + CABECERA_CAMPO.length - 1);
 
 // Donde esta cada cosa en cada hoja (mismos indices que informe.js).
 const USR = { nombre: 0, email: 1, rol: 3, alta: 5, estado: 8 };
@@ -160,7 +177,7 @@ module.exports.register = function register(app, ctx) {
       const sheetsClient = await getSheetsClient();
       await asegurarCampo(sheetsClient);
       const [filas, grupos] = await leerVarios(sheetsClient, [
-        `${HOJA_CAMPO}!A2:L`, 'Groups!A2:R',
+        `${HOJA_CAMPO}!A2:${COL_FIN}`, 'Groups!A2:R',
       ]);
       const nombreDe = new Map(grupos
         .filter((g) => g[GRP.id])
@@ -175,6 +192,8 @@ module.exports.register = function register(app, ctx) {
         responsable: (f[CAMPO.responsable] || '').toString(),
         evidencia: (f[CAMPO.evidencia] || '').toString(),
         observacion: (f[CAMPO.observacion] || '').toString(),
+        nombreEnElPlan: (f[CAMPO.nombrePlan] || '').toString(),
+        fuenteDeLaSeleccion: (f[CAMPO.fuente] || '').toString(),
         actualizado: dia(f[CAMPO.actualizadoEn]),
       }));
 
@@ -208,7 +227,7 @@ module.exports.register = function register(app, ctx) {
       try {
         const sheetsClient = await getSheetsClient();
         await asegurarCampo(sheetsClient);
-        const filas = await leer(sheetsClient, `${HOJA_CAMPO}!A2:L`);
+        const filas = await leer(sheetsClient, `${HOJA_CAMPO}!A2:${COL_FIN}`);
         const posicion = new Map();
         filas.forEach((f, i) => {
           const gid = normalizeGroupKey(f[CAMPO.id]);
@@ -249,24 +268,34 @@ module.exports.register = function register(app, ctx) {
             tomar(e.observacion, CAMPO.observacion, 500),
             quien,
             ahora,
+            tomar(e.nombreEnElPlan ?? e.NombreEnElPlan, CAMPO.nombrePlan, 200),
+            tomar(e.fuenteDeLaSeleccion ?? e.FuenteDeLaSeleccion, CAMPO.fuente, 300),
           ];
           if (posicion.has(gid)) cambios.push({ fila: posicion.get(gid), valores: fila });
           else nuevas.push(fila);
           tocados.push(gid);
         }
 
-        for (const c of cambios) {
-          await sheetsClient.spreadsheets.values.update({
+        // Todas las filas que cambian, en UNA llamada. Una por fila costaba 19
+        // escrituras al anotar la lista entera, y cada escritura invalida la
+        // memoria del libro completo, asi que ademas obligaba a releerlo 19
+        // veces. Es el mismo defecto que tenia el sembrado.
+        if (cambios.length) {
+          await sheetsClient.spreadsheets.values.batchUpdate({
             spreadsheetId: SPREADSHEET_ID,
-            range: `${HOJA_CAMPO}!A${c.fila}:L${c.fila}`,
-            valueInputOption: 'RAW',
-            resource: { values: [c.valores] },
+            resource: {
+              valueInputOption: 'RAW',
+              data: cambios.map((c) => ({
+                range: `${HOJA_CAMPO}!A${c.fila}:${COL_FIN}${c.fila}`,
+                values: [c.valores],
+              })),
+            },
           });
         }
         if (nuevas.length) {
           await sheetsClient.spreadsheets.values.append({
             spreadsheetId: SPREADSHEET_ID,
-            range: `${HOJA_CAMPO}!A:L`,
+            range: `${HOJA_CAMPO}!A:${COL_FIN}`,
             valueInputOption: 'RAW',
             resource: { values: nuevas },
           });
@@ -307,7 +336,7 @@ module.exports.register = function register(app, ctx) {
         // pasa la lista blanca.
         'Users!A2:I', 'Groups!A2:R', 'UserGroupLinks!A2:F', `${hojaAccesos}!A1:H`,
         'Savings!A2:L', 'Acciones!A2:M', 'Loans!A2:K', 'LoanPayments!A2:O',
-        'Asambleas!A2:N', `${HOJA_CAMPO}!A2:L`,
+        'Asambleas!A2:N', `${HOJA_CAMPO}!A2:${COL_FIN}`,
       ]);
 
       // La primera fila es la cabecera, no un acceso.
@@ -498,6 +527,16 @@ module.exports.register = function register(app, ctx) {
         .filter(([, f]) => bajo(f[CAMPO.esCayc]) !== 'no')
         .map(([gid]) => gid);
 
+      // Cuantos de ellos NO dicen de donde sale que son del proyecto. Sin esto,
+      // el denominador es una lista que alguien escribio y hay que creersela;
+      // con esto es una lista que se puede comprobar documento por documento.
+      // Importa porque el denominador es la cifra mas discutida del indicador:
+      // segun cual sea la lista, el resultado cambia de 5 % a 91 %.
+      const caycSinFuente = caycIds.filter((gid) => {
+        const f = fichaDe.get(gid) || [];
+        return !(f[CAMPO.fuente] || '').toString().trim();
+      });
+
       // --- una fila por grupo ---------------------------------------------
       const filasGrupos = [];
       const filasNomina = [];
@@ -578,6 +617,11 @@ module.exports.register = function register(app, ctx) {
           Responsable: (ficha[CAMPO.responsable] || '').toString(),
           Evidencia: (ficha[CAMPO.evidencia] || '').toString(),
           Observacion: (ficha[CAMPO.observacion] || '').toString(),
+          // Los dos nombres juntos y en la misma fila: es lo que permite cotejar
+          // el Plan con la plataforma sin preguntarle a nadie, y lo que evita
+          // que alguien renombre grupos en la app para que cuadre el informe.
+          'Nombre en el Plan': (ficha[CAMPO.nombrePlan] || '').toString(),
+          'Fuente de la seleccion': (ficha[CAMPO.fuente] || '').toString(),
         });
 
         const orden = { presidente: 0, tesorero: 1, secretario: 2, member: 3 };
@@ -669,40 +713,37 @@ module.exports.register = function register(app, ctx) {
       const filasSembrado = sembrado.aportes + sembrado.acciones + sembrado.prestamos
         + sembrado.pagos + sembrado.asambleas + sembrado.entradas;
 
-      const filasIndicador = [
-        ...(!hayDenominador ? [{
+      // ORDEN POR SEVERIDAD, no por orden de aparicion en el codigo. Cada vez
+      // que anadi un aviso nuevo lo puse donde cabia, y dos veces desplace sin
+      // querer uno mas grave; las dos veces lo cazo una prueba. Con dos listas
+      // separadas el orden ya no depende de donde se escriba cada bloque.
+      //
+      // GRAVES: el documento no se puede usar como medio de verificacion, o la
+      // cifra que trae no se puede afirmar. Van primero porque quien abra el
+      // archivo tiene que verlas antes que el numero.
+      const graves = [];
+      // AVISOS: la cifra es la que es, pero conviene saber en que se apoya.
+      const avisos = [];
+
+      if (!hayDenominador) {
+        graves.push({
           Concepto: 'ATENCION: todavia no hay indicador',
           Valor: 'Ningun grupo esta marcado como CAYC en la hoja SeguimientoCampo, asi que el '
                + 'denominador es 0 y no hay nada que calcular. Esto NO significa que la meta no '
                + 'se cumpla: significa que la direccion del proyecto aun no ha fijado que grupos '
                + 'entran en el indicador. Mientras tanto este documento sirve como diagnostico, '
                + 'no como medio de verificacion.',
-        }] : []),
-        // El aviso de los datos sembrados va ANTES que el de "sin medir": si el
-        // documento se genero con datos inventados dentro, eso es lo primero que
-        // tiene que saber quien lo abra, y lo demas ya da igual.
-        ...(incluirDemo ? [{
+        });
+      }
+      if (incluirDemo) {
+        graves.push({
           Concepto: 'AVISO',
           Valor: 'Este documento INCLUYE datos de demostracion. NO sirve como medio de '
                + 'verificacion ante el INCYT. Para el informe hay que generarlo sin ellos.',
-        }] : []),
-        ...(ventana.marcasEnDesacuerdo > 0 ? [{
-          Concepto: 'Aviso: las dos marcas de lo sembrado no coinciden',
-          Valor: `${ventana.marcasEnDesacuerdo} filas de la hoja de accesos tienen una marca de `
-               + 'demostracion y la otra no. Quedan fuera igualmente, porque basta con que una '
-               + 'lo diga, asi que ninguna cifra de este documento cambia por ello. Lo que '
-               + 'cambia es en que se apoya: esas filas se clasificaron con una marca en vez de '
-               + 'dos. Conviene arreglarlo mientras todavia queda la otra.',
-        }] : []),
-        ...(ventana.supuestos > 0 ? [{
-          Concepto: 'Aviso: entradas con el origen supuesto',
-          Valor: `${ventana.supuestos} de los ${ventana.apuntes} apuntes no traen marca de `
-               + 'origen. Son anteriores a que existiera esa columna y se cuentan como inicio '
-               + 'de sesion, que es lo que documenta quien las escribio, pero es un SUPUESTO y '
-               + 'no una lectura. Si esa diferencia importa para el informe, la decision es de '
-               + 'la direccion del proyecto y no de este programa.',
-        }] : []),
-        ...(ventana.marcasDesconocidas.length > 0 ? [{
+        });
+      }
+      if (ventana.marcasDesconocidas.length > 0) {
+        graves.push({
           Concepto: 'ATENCION: el registro de entradas trae marcas desconocidas',
           Valor: `La hoja de accesos contiene el origen ${ventana.marcasDesconocidas
             .map((m) => `"${m}"`).join(', ')}, que este instrumento no sabe clasificar. `
@@ -710,37 +751,83 @@ module.exports.register = function register(app, ctx) {
                + `reales y "${ORIGEN_SEMBRADO}" como sembradas. Mientras haya marcas sin clasificar `
                + 'no se puede afirmar nada sobre el uso, porque podria estar contando como real '
                + 'algo que no lo es. Todos los grupos salen como "sin medir" en esa condicion.',
-        }] : []),
-        // Y este solo cuando de verdad hay grupos sin evaluar. Colgarlo de
-        // `!medible` lo disparaba tambien con los datos sembrados dentro, y
-        // entonces anunciaba "0 de 10 grupos no se pueden evaluar", que no
-        // significa nada.
-        ...(sinMedir > 0 && hayDenominador ? [{
+        });
+      }
+      // Solo cuando de verdad hay grupos sin evaluar. Colgarlo de `!medible` lo
+      // disparaba tambien con los datos sembrados dentro, y entonces anunciaba
+      // "0 de 10 grupos no se pueden evaluar", que no significa nada.
+      if (sinMedir > 0 && hayDenominador) {
+        graves.push({
           Concepto: 'ATENCION: el indicador NO se puede afirmar todavia',
           Valor: `${sinMedir} de ${denominador} grupos no se pueden evaluar porque el registro `
                + `de entradas a la app empieza el ${ventana.desde || 'sin datos'} y sus socias `
                + 'estaban dadas de alta desde antes. Lo que hicieran antes de esa fecha no quedo '
                + 'anotado en ninguna parte, asi que no es un cero: es un dato que falta. '
                + 'El porcentaje de abajo es una COTA INFERIOR, no la medicion.',
-        }] : []),
-        ...(ventana.total > 0 ? [{
+        });
+      }
+
+      if (caycSinFuente.length > 0) {
+        avisos.push({
+          Concepto: 'Aviso: el denominador no esta documentado por completo',
+          Valor: `${caycSinFuente.length} de los ${denominador} grupos marcados como CAYC no dicen `
+               + 'de donde sale que pertenecen al proyecto (columna FuenteDeLaSeleccion de la hoja '
+               + 'SeguimientoCampo). El indicador se calcula igual, pero esa parte del denominador '
+               + 'hay que creersela en vez de poder comprobarla. El denominador es la cifra mas '
+               + 'discutida de este indicador, asi que conviene que cada grupo diga en que '
+               + 'documento, tabla o acta consta.',
+        });
+      }
+      if (ventana.marcasEnDesacuerdo > 0) {
+        avisos.push({
+          Concepto: 'Aviso: las dos marcas de lo sembrado no coinciden',
+          Valor: `${ventana.marcasEnDesacuerdo} filas de la hoja de accesos tienen una marca de `
+               + 'demostracion y la otra no. Quedan fuera igualmente, porque basta con que una '
+               + 'lo diga, asi que ninguna cifra de este documento cambia por ello. Lo que '
+               + 'cambia es en que se apoya: esas filas se clasificaron con una marca en vez de '
+               + 'dos. Conviene arreglarlo mientras todavia queda la otra.',
+        });
+      }
+      if (ventana.supuestos > 0) {
+        avisos.push({
+          Concepto: 'Aviso: entradas con el origen supuesto',
+          Valor: `${ventana.supuestos} de los ${ventana.apuntes} apuntes no traen marca de `
+               + 'origen. Son anteriores a que existiera esa columna y se cuentan como inicio '
+               + 'de sesion, que es lo que documenta quien las escribio, pero es un SUPUESTO y '
+               + 'no una lectura. Si esa diferencia importa para el informe, la decision es de '
+               + 'la direccion del proyecto y no de este programa.',
+        });
+      }
+      if (ventana.total > 0) {
+        avisos.push({
           Concepto: 'Registro de entradas: como se reparten las filas',
           Valor: `${ventana.total} filas en total = ${ventana.apuntes} entradas reales `
                + `(${ventana.supuestos} de ellas con el origen supuesto) `
                + `+ ${ventana.sembrados} sembradas + ${ventana.descartados} sin clasificar. `
-               + 'Las tres cifras se publican para que la suma cierre sin tener que restar.',
-        }] : []),
-        ...(!incluirDemo && filasSembrado > 0 ? [{
+               + 'Las cuatro cifras se publican para que la suma cierre sin tener que restar.',
+        });
+      }
+      if (!incluirDemo && filasSembrado > 0) {
+        avisos.push({
           Concepto: 'Base del calculo',
           Valor: `Solo datos reales. Se dejaron fuera ${filasSembrado} filas sembradas para `
                + 'demostrar el funcionamiento de la app.',
-        }] : []),
+        });
+      }
+
+      const filasIndicador = [
+        ...graves,
+        ...avisos,
         { Concepto: 'Indicador', Valor: 'IN-DIBA-2026-1.2' },
         { Concepto: 'Meta', Valor: 'Porcentaje de las CAYC seleccionadas estan digitalizadas' },
         { Concepto: 'Meta cuantitativa', Valor: `${META} %` },
         { Concepto: 'NUMERADOR (grupos CAYC digitalizados)', Valor: numerador },
         { Concepto: 'DENOMINADOR (total de grupos CAYC)', Valor: denominador },
         { Concepto: 'Grupos que NO se pueden evaluar', Valor: sinMedir },
+        {
+          Concepto: 'Denominador con su fuente documentada',
+          Valor: `${denominador - caycSinFuente.length} de ${denominador}`,
+        },
         {
           Concepto: 'RESULTADO',
           Valor: !hayDenominador ? 'sin denominador: falta marcar las CAYC en SeguimientoCampo'
@@ -832,6 +919,7 @@ module.exports.register = function register(app, ctx) {
           cumple: medible ? porcentaje >= META : null,
           medible,
           sinMedir,
+          caycSinFuenteDocumentada: caycSinFuente.length,
           ventanaDeRegistro: ventana,
         },
         hojas: [

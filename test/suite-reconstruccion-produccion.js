@@ -359,6 +359,23 @@ module.exports = async function run() {
   t.check('se publica desde cuando hay registro',
     !!(ind5.find((x) => /desde/i.test(String(x.Concepto))) || {}).Valor, '');
 
+  // EL ORDEN DE LOS AVISOS NO ES COSMETICA. Aqui coinciden una advertencia grave
+  // (el indicador no se puede afirmar) y un aviso menor (el denominador no esta
+  // documentado). La grave tiene que ir ANTES: quien abra el archivo tiene que
+  // verla antes que el numero. Se fija en una prueba porque al anadir avisos
+  // nuevos desplace sin querer uno grave DOS veces, y las dos me salvo una
+  // prueba, no el cuidado.
+  const posGrave = ind5.findIndex((x) => /^ATENCION/.test(String(x.Concepto)));
+  const posAviso = ind5.findIndex((x) => /^Aviso:/.test(String(x.Concepto)));
+  t.check('hay una advertencia grave y un aviso menor a la vez',
+    posGrave >= 0 && posAviso >= 0, `grave=${posGrave} aviso=${posAviso}`);
+  t.check('y la grave va antes que el aviso',
+    posGrave < posAviso, JSON.stringify(ind5.map((x) => x.Concepto).slice(0, 6)));
+  t.check('ningun ATENCION queda por debajo de un Aviso',
+    ind5.every((x, i) => !/^ATENCION/.test(String(x.Concepto))
+      || !ind5.slice(0, i).some((y) => /^Aviso:/.test(String(y.Concepto)))),
+    JSON.stringify(ind5.map((x) => x.Concepto).slice(0, 8)));
+
   // El contraste: si el registro empezara ANTES de las altas, si se puede medir.
   for (const f of rejilla) {
     if (f[1] && NOMINA.some((g) => g.id === f[1])) f[2] = '2026-09-20T10:00:00.000Z';
