@@ -130,6 +130,13 @@ const fechaEnLetras = (d = new Date()) => {
 };
 const fechaEcuador = (d = new Date()) => new Date(d.getTime() - 5 * 3600 * 1000)
   .toISOString().slice(0, 10);
+/** "2026-09-16" -> "16 de septiembre de 2026" (el dia ya viene decidido). */
+const diaEnLetras = (iso) => {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${Number(m[3])} de ${MESES[Number(m[2]) - 1]} de ${m[1]}` : String(iso || '');
+};
+/** "1 ahorro", "2 ahorros": el informe no dice "1 ahorros". */
+const cuantos = (n, uno, varios) => `${n} ${n === 1 ? uno : varios}`;
 const CORREO_VALIDO = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
 
 /**
@@ -1254,8 +1261,10 @@ module.exports.register = function register(app, ctx) {
           PREGUNTA: '¿Cuántos grupos registran ya aportes propios en la plataforma?',
           RESPUESTA: conMovimiento.length,
           DETALLE: conMovimiento.length
-            ? `${nombres(conMovimiento)}: ${operaciones.ahorros} ahorros, ${operaciones.acciones} `
-              + `acciones y ${operaciones.prestamos} préstamos, ${operaciones.total} movimientos en total`
+            ? `${nombres(conMovimiento)}: ${cuantos(operaciones.ahorros, 'ahorro', 'ahorros')}, `
+              + `${cuantos(operaciones.acciones, 'acción', 'acciones')} y `
+              + `${cuantos(operaciones.prestamos, 'préstamo', 'préstamos')}; `
+              + `${cuantos(operaciones.total, 'movimiento', 'movimientos')} en total`
             : 'Ningún grupo digitalizado ha registrado todavía un movimiento propio en la plataforma',
         },
         {
@@ -1263,9 +1272,9 @@ module.exports.register = function register(app, ctx) {
           RESPUESTA: entradasSocias,
           DETALLE: (ventana.desde
             ? `Entradas de las socias y socios de los ${numerador} grupos digitalizados registradas `
-              + `por el sistema desde el ${ventana.desde} hasta el ${ventana.hasta}. `
+              + `por el sistema desde el ${diaEnLetras(ventana.desde)} hasta el ${diaEnLetras(ventana.hasta)}. `
             : 'El registro de accesos todavía no tiene ninguna entrada real. ')
-            + `En ${conMitad.length} grupo(s) al menos la mitad de sus integrantes ha ingresado`
+            + `${conMitad.length === 0 ? 'En ningún grupo' : `En ${cuantos(conMitad.length, 'grupo', 'grupos')}`} al menos la mitad de sus integrantes ha ingresado`
             + (sinMedir > 0 ? `; en ${sinMedir} no se puede afirmar (el registro empezó después de su alta)` : ''),
         },
         {
