@@ -13,7 +13,12 @@
  *   - 18 entradas reales a la app, frente a 821 sembradas.
  *   - 899 aportes sembrados, que no deben contar para nada.
  *
- *   REC 1: la base tal como esta -> numerador 0, y se ve POR QUE.
+ *   REC 1: la base tal como esta -> 9 incorporados, NINGUNO en uso, y se ve POR QUE.
+ *
+ * Desde el 28-sep-2026 el numerador es el del informe firmado (nivel 1,
+ * incorporado con su nomina). La regla con la que se escribio esta suite
+ * (directiva + dinero + uso) es el nivel 4, y es donde se siguen midiendo
+ * aqui las conclusiones sobre el uso.
  *   REC 2: que haria falta para mover el indicador (hipotetico, no es la base).
  *   REC 3: si lo sembrado contara, el indicador se dispararia. Por eso no cuenta.
  *   REC 4: cuanto dinero propio hay de verdad en los diez grupos.
@@ -146,10 +151,14 @@ module.exports = async function run() {
 
     // La ficha de campo marca los 10 como CAYC: es el denominador que se esta usando.
     const r = await post('/api/admin/seguimiento-campo', {
+      // La nomina de cofrecito nunca se entrego (una sola persona): es el unico
+      // sin forma de incorporacion, como en el registro real.
       grupos: NOMINA.map((g) => ({
         groupId: g.id, grupo: g.nombre, esCayc: true,
         socializacionFecha: '2026-08-15', socializacionAsistentes: g.socias,
         responsable: 'Sabina Villon',
+        formaDeIncorporacion: g.id === 'g_cofrecito' ? '' : 'Nómina entregada por el grupo',
+        capacitado: g.id !== 'g_cofrecito',
       })),
     }, e.tokens.admin);
     hoja.invalidarTodo();
@@ -175,9 +184,11 @@ module.exports = async function run() {
   let r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
   t.status('el instrumento responde', r, 200);
   t.eq('el denominador son los 10 grupos marcados como CAYC', r.body.indicador.denominador, 10);
-  t.eq('el numerador es CERO', r.body.indicador.numerador, 0);
-  t.eq('o sea 0 %', r.body.indicador.porcentaje, 0);
-  t.eq('y no llega a la meta', r.body.indicador.cumple, false);
+  const usoDe = (resp) => (resp.body.indicador.niveles || []).find((n) => n.clave === 'uso') || {};
+  t.eq('el numerador son los nueve grupos con su nomina', r.body.indicador.numerador, 9);
+  t.eq('o sea 90 %', r.body.indicador.porcentaje, 90);
+  t.eq('pero en el nivel 4, el uso, son CERO', usoDe(r).grupos, 0);
+  t.eq('y no es un cero por falta de registro: nada queda sin medir', usoDe(r).sinMedir, 0);
 
   // Y el documento dice de que base sale, para que nadie crea que la app esta vacia:
   // hay 1.720 filas sembradas debajo que quedaron fuera a proposito.
@@ -190,8 +201,9 @@ module.exports = async function run() {
 
   const grupos = ((r.body.hojas || []).find((h) => h.nombre === 'Grupos') || {}).filas || [];
   t.eq('salen los 10 grupos con su detalle', grupos.length, 10);
-  t.check('ninguno figura digitalizado', grupos.every((g) => g.DIGITALIZADA === 'no'),
-    JSON.stringify(grupos.filter((g) => g.DIGITALIZADA === 'si')));
+  const N4 = 'Nivel 4: en uso por sus socias';
+  t.check('ninguno figura en uso por sus socias', grupos.every((g) => g[N4] === 'no'),
+    JSON.stringify(grupos.filter((g) => g[N4] !== 'no').map((g) => g.Grupo)));
   t.check('a todos se les dice que les falta', grupos.every((g) => String(g['Que le falta'] || '').length > 0), '');
 
   // Lo que de verdad frena a los dos grupos que si tienen dinero propio: no es
@@ -222,25 +234,26 @@ module.exports = async function run() {
   r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
   t.status('el instrumento responde', r, 200);
   t.eq('el denominador no cambia', r.body.indicador.denominador, 10);
-  t.eq('el numerador sube a 1', r.body.indicador.numerador, 1);
-  t.eq('o sea 10 %', r.body.indicador.porcentaje, 10);
-  t.eq('y SIGUE sin llegar a la meta del 50 %', r.body.indicador.cumple, false);
+  t.eq('el nivel 4 sube a 1', usoDe(r).grupos, 1);
+  t.eq('o sea 10 %', usoDe(r).porcentaje, 10);
+  t.eq('y el numerador (incorporados) no se mueve por el uso', r.body.indicador.numerador, 9);
 
   const grupos2 = ((r.body.hojas || []).find((h) => h.nombre === 'Grupos') || {}).filas || [];
-  const siDigit = grupos2.filter((g) => g.DIGITALIZADA === 'si').map((g) => g.GrupoID).sort();
+  const siDigit = grupos2.filter((g) => g[N4] === 'si').map((g) => g.GrupoID).sort();
   t.eq('y es solo Juntos Crecemos', siDigit.join(','), 'g_juntos');
 
   // cofrecito tiene dinero y su unica socia entro, pero sin tesoreria no cuenta:
   // la condicion de directiva existe para que la caja tenga control interno.
   const cofre2 = grupos2.find((g) => g.GrupoID === 'g_cofrecito');
-  t.eq('cofrecito no cuela sin tesoreria', cofre2 && cofre2.DIGITALIZADA, 'no');
+  t.eq('cofrecito no cuela sin tesoreria', cofre2 && cofre2[N4], 'no');
+  t.eq('ni cuenta como digitalizado sin nomina', cofre2 && cofre2.DIGITALIZADA, 'no');
   t.check('y se dice exactamente eso',
     /directiva|tesoreria|presidencia/i.test(String(cofre2 && cofre2['Que le falta'])),
     JSON.stringify(cofre2));
 
   // Mi aguinaldo tiene 52 socias y ninguna entro: sigue sin contar.
   const aguinaldo = grupos2.find((g) => g.GrupoID === 'g_aguinaldo');
-  t.eq('el grupo grande sigue sin contar', aguinaldo && aguinaldo.DIGITALIZADA, 'no');
+  t.eq('el grupo grande sigue sin uso', aguinaldo && aguinaldo[N4], 'no');
 
   // ===================================================================
   t.section('REC 3. Por que lo sembrado no puede contar');
@@ -248,8 +261,8 @@ module.exports = async function run() {
   // Mismo libro, misma base. Solo cambia si se cuentan los datos de demostracion.
   r = await get('/api/admin/instrumento-digitalizacion?incluirDemo=1', m.e.tokens.admin);
   t.status('el instrumento responde tambien con lo sembrado', r, 200);
-  t.check('con lo sembrado el indicador se dispara',
-    r.body.indicador.numerador > 2, `numerador=${r.body.indicador.numerador}`);
+  t.check('con lo sembrado el uso (nivel 4) se dispara',
+    usoDe(r).grupos > 2, `nivel 4=${usoDe(r).grupos}`);
   t.eq('pero el archivo se renombra para que nadie lo confunda',
     /CON-DATOS-DE-DEMOSTRACION/.test(String(r.body.archivo)), true);
   t.eq('y deja de declararse como solo datos reales', r.body.soloDatosReales, false);
@@ -328,9 +341,9 @@ module.exports = async function run() {
 
   r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
   t.status('el instrumento responde', r, 200);
-  t.eq('y declara que NO se puede medir', r.body.indicador.medible, false);
-  t.eq('el numerador sigue siendo 0', r.body.indicador.numerador, 0);
-  t.eq('pero ya no se afirma que incumple la meta', r.body.indicador.cumple, null);
+  t.eq('y declara que el USO no se puede medir', r.body.indicador.usoMedible, false);
+  t.eq('el numerador no depende del registro de entradas', r.body.indicador.numerador, 9);
+  t.eq('y el nivel 1 se sigue afirmando', r.body.indicador.medible, true);
 
   const g5 = ((r.body.hojas || []).find((h) => h.nombre === 'Grupos') || {}).filas || [];
   // La distincion fina, y es la que importa: un grupo que falla una condicion
@@ -339,11 +352,11 @@ module.exports = async function run() {
   // directiva, asi que su unica incognita es el uso: ese es el que no se afirma.
   t.eq('solo queda sin medir el grupo al que unicamente le falta lo inmedible',
     r.body.indicador.sinMedir, 1);
-  const enDuda = g5.filter((g) => g.DIGITALIZADA === 'sin medir').map((g) => g.GrupoID);
+  const enDuda = g5.filter((g) => g[N4] === 'sin medir').map((g) => g.GrupoID);
   t.eq('y es Juntos Crecemos', enDuda.join(','), 'g_juntos');
   t.check('los que fallan por dinero o directiva siguen siendo un no claro',
-    g5.filter((g) => g.DIGITALIZADA === 'no').length === 9,
-    JSON.stringify(g5.map((g) => `${g.Grupo}:${g.DIGITALIZADA}`)));
+    g5.filter((g) => g[N4] === 'no').length === 9,
+    JSON.stringify(g5.map((g) => `${g.Grupo}:${g[N4]}`)));
   t.check('al que esta en duda se le dice por que no se pudo medir',
     /SIN MEDIR/.test(String((g5.find((g) => g.GrupoID === 'g_juntos') || {})['Que le falta'])),
     JSON.stringify(g5.find((g) => g.GrupoID === 'g_juntos')));
@@ -353,28 +366,12 @@ module.exports = async function run() {
   const ind5 = ((r.body.hojas || []).find((h) => h.nombre === 'Indicador') || {}).filas || [];
   t.check('el aviso encabeza la hoja Indicador',
     /no se puede afirmar/i.test(String(ind5[0] && ind5[0].Concepto)), JSON.stringify(ind5[0]));
-  t.check('y el resultado se presenta como cota inferior, no como medicion',
-    /sin medir/i.test(String((ind5.find((x) => x.Concepto === 'RESULTADO') || {}).Valor)),
-    JSON.stringify(ind5.find((x) => x.Concepto === 'RESULTADO')));
+  t.check('y el nivel 4 se presenta como intervalo, no como medicion',
+    / a /.test(String((ind5.find((x) => /^Nivel 4/.test(String(x.Concepto))) || {}).Valor)),
+    JSON.stringify(ind5.find((x) => /^Nivel 4/.test(String(x.Concepto)))));
   t.check('se publica desde cuando hay registro',
     !!(ind5.find((x) => /desde/i.test(String(x.Concepto))) || {}).Valor, '');
 
-  // EL ORDEN DE LOS AVISOS NO ES COSMETICA. Aqui coinciden una advertencia grave
-  // (el indicador no se puede afirmar) y un aviso menor (el denominador no esta
-  // documentado). La grave tiene que ir ANTES: quien abra el archivo tiene que
-  // verla antes que el numero. Se fija en una prueba porque al anadir avisos
-  // nuevos desplace sin querer uno grave DOS veces, y las dos me salvo una
-  // prueba, no el cuidado.
-  const posGrave = ind5.findIndex((x) => /^ATENCION/.test(String(x.Concepto)));
-  const posAviso = ind5.findIndex((x) => /^Aviso:/.test(String(x.Concepto)));
-  t.check('hay una advertencia grave y un aviso menor a la vez',
-    posGrave >= 0 && posAviso >= 0, `grave=${posGrave} aviso=${posAviso}`);
-  t.check('y la grave va antes que el aviso',
-    posGrave < posAviso, JSON.stringify(ind5.map((x) => x.Concepto).slice(0, 6)));
-  t.check('ningun ATENCION queda por debajo de un Aviso',
-    ind5.every((x, i) => !/^ATENCION/.test(String(x.Concepto))
-      || !ind5.slice(0, i).some((y) => /^Aviso:/.test(String(y.Concepto)))),
-    JSON.stringify(ind5.map((x) => x.Concepto).slice(0, 8)));
 
   // El contraste: si el registro empezara ANTES de las altas, si se puede medir.
   for (const f of rejilla) {
@@ -382,10 +379,10 @@ module.exports = async function run() {
   }
   hoja.invalidarTodo();
   r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
-  t.eq('con el registro cubriendo el periodo, vuelve a ser medible',
-    r.body.indicador.medible, true);
-  t.eq('y entonces si se puede afirmar que no llega a la meta',
-    r.body.indicador.cumple, false);
+  t.eq('con el registro cubriendo el periodo, el uso vuelve a ser medible',
+    r.body.indicador.usoMedible, true);
+  t.eq('y entonces si se puede afirmar el nivel 4: ninguno en uso',
+    `${usoDe(r).grupos}/${usoDe(r).sinMedir}`, '0/0');
 
   // ===================================================================
   t.section('REC 7. Una marca de acceso desconocida no pasa por real');
@@ -414,7 +411,7 @@ module.exports = async function run() {
 
   r = await get('/api/admin/instrumento-digitalizacion', m.e.tokens.admin);
   t.status('el instrumento responde igual', r, 200);
-  t.eq('pero NO se declara medible', r.body.indicador.medible, false);
+  t.eq('pero el USO NO se declara medible', r.body.indicador.usoMedible, false);
   // Las 821 disfrazadas van de marzo a agosto. Si se colaran, la ventana se
   // ensancharia hacia atras y los apuntes se irian a varios cientos. Lo que
   // queda son las entradas de verdad del escenario, todas de septiembre.
@@ -444,9 +441,26 @@ module.exports = async function run() {
     JSON.stringify(ind7.slice(0, 3)));
 
   const g7 = ((r.body.hojas || []).find((h) => h.nombre === 'Grupos') || {}).filas || [];
-  t.check('y ningun grupo se da por digitalizado con ese registro',
-    g7.every((g) => g.DIGITALIZADA !== 'si'),
-    JSON.stringify(g7.filter((g) => g.DIGITALIZADA === 'si').map((x) => x.Grupo)));
+  t.check('y ningun grupo se da por EN USO con ese registro',
+    g7.every((g) => g[N4] !== 'si'),
+    JSON.stringify(g7.filter((g) => g[N4] === 'si').map((x) => x.Grupo)));
+
+  // EL ORDEN DE LOS AVISOS NO ES COSMETICA. Aqui coinciden una advertencia grave
+  // (el registro de entradas trae marcas que no se saben leer) y avisos menores
+  // (el uso sin medir, grupos sin nomina anotada). La grave tiene que ir ANTES:
+  // quien abra el archivo tiene que verla antes que el numero. Se fija en una
+  // prueba porque al anadir avisos nuevos desplace sin querer uno grave DOS
+  // veces, y las dos me salvo una prueba, no el cuidado.
+  const posGrave = ind7.findIndex((x) => /^ATENCION/.test(String(x.Concepto)));
+  const posAviso = ind7.findIndex((x) => /^Aviso:/.test(String(x.Concepto)));
+  t.check('hay una advertencia grave y un aviso menor a la vez',
+    posGrave >= 0 && posAviso >= 0, `grave=${posGrave} aviso=${posAviso}`);
+  t.check('y la grave va antes que el aviso',
+    posGrave < posAviso, JSON.stringify(ind7.map((x) => x.Concepto).slice(0, 6)));
+  t.check('ningun ATENCION queda por debajo de un Aviso',
+    ind7.every((x, i) => !/^ATENCION/.test(String(x.Concepto))
+      || !ind7.slice(0, i).some((y) => /^Aviso:/.test(String(y.Concepto)))),
+    JSON.stringify(ind7.map((x) => x.Concepto).slice(0, 8)));
 
   // ===================================================================
   t.section('REC 8. Una columna movida no se lee como "inicio de sesion"');
@@ -475,12 +489,12 @@ module.exports = async function run() {
     (r.body.indicador.ventanaDeRegistro.marcasDesconocidas || [])
       .includes('columna-origen-desplazada'),
     JSON.stringify(r.body.indicador.ventanaDeRegistro.marcasDesconocidas));
-  t.eq('el indicador no se declara medible', r.body.indicador.medible, false);
+  t.eq('el uso no se declara medible', r.body.indicador.usoMedible, false);
 
   const g8 = ((r.body.hojas || []).find((h) => h.nombre === 'Grupos') || {}).filas || [];
-  t.check('ningun grupo se da por digitalizado',
-    g8.every((g) => g.DIGITALIZADA !== 'si'),
-    JSON.stringify(g8.filter((g) => g.DIGITALIZADA === 'si').map((x) => x.Grupo)));
+  t.check('ningun grupo se da por en uso',
+    g8.every((g) => g[N4] !== 'si'),
+    JSON.stringify(g8.filter((g) => g[N4] === 'si').map((x) => x.Grupo)));
 
   // El contraste: con la cabecera en su sitio, una fila vieja SIN marca sigue
   // contando como inicio de sesion. El backfill historico no se rompe.

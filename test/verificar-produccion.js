@@ -15,7 +15,11 @@
 
 const BASE = (process.argv[2] || 'https://backend-appahorro.onrender.com').replace(/\/+$/, '');
 const ORIGEN_WEB = (process.argv[3] || 'https://juntago.com').replace(/\/+$/, '');
-const VERSION_ESPERADA = '2026.09.16-cuota';
+// Se lee de server.js: escrita a mano se quedaba atras en cada despliegue y
+// el verificador daba por fallido un despliegue correcto.
+const VERSION_ESPERADA = require('fs')
+  .readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8')
+  .match(/const BACKEND_VERSION = '([^']+)'/)[1];
 
 const V = '\x1b[32m';
 const R = '\x1b[31m';

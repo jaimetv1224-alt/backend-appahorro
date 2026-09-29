@@ -32,6 +32,16 @@
  * con prefijo `demo_` y aqui se descarta. Un informe de avance no puede
  * alimentarse de cifras de demostracion; el instrumento ademas dice cuantas
  * filas sembradas encontro, para que se vea que las vio y las dejo fuera.
+ *
+ * LA METODOLOGIA ES LA DEL INFORME QUE SE ENTREGO (28-sep-2026). El "Informe de
+ * cumplimiento del indicador IN-DIBA-2026-1.2" que firma la direccion define
+ * digitalizado como INCORPORADO: el grupo esta en la plataforma con la nomina
+ * de sus integrantes. Siete hitos llevan de la socializacion al uso, y cuatro
+ * niveles acumulativos dicen cuan hondo llego cada grupo. La regla anterior de
+ * este modulo (directiva + dinero + uso) no se tira: es exactamente el nivel 4,
+ * y se sigue publicando con su "sin medir". Asi el documento y la plataforma
+ * miden lo mismo con las mismas palabras, y la plataforma pone las cifras que
+ * salen de sus datos, sean las que sean.
  */
 
 'use strict';
@@ -54,12 +64,26 @@ const CABECERA_CAMPO = [
   // lo dice. Sin esto el denominador es una lista que alguien escribio, y con
   // esto es una lista que se puede comprobar.
   'FuenteDeLaSeleccion',
+  // Lo que pide el registro de grupos socializados del informe, en columnas
+  // nuevas AL FINAL para no mover ninguna de las anteriores:
+  //   Procedencia: "Listado inicial del Plan Integral", "Identificado durante
+  //     la ejecucion" o "Conformado en las jornadas del proyecto".
+  //   Capacitado: si/no, cuando la capacitacion consta en el registro del
+  //     equipo sin una fecha propia (la fecha, si la hay, va en su columna).
+  //   FormaDeIncorporacion: como entro la nomina a la plataforma. Es el hito
+  //     "Nomina levantada": vacia, el grupo NO cuenta como incorporado aunque
+  //     tenga cuentas enlazadas (un grupo de una sola persona que nunca entrego
+  //     su nomina no es un grupo digitalizado).
+  //   Parroquia y OrdenEnElPlan: para el listado inicial del Plan Integral.
+  //   Orden: el del registro que certifica la direccion.
+  'Procedencia', 'Capacitado', 'FormaDeIncorporacion', 'Parroquia', 'OrdenEnElPlan', 'Orden',
 ];
 const CAMPO = {
   id: 0, grupo: 1, esCayc: 2, socFecha: 3, socAsistentes: 4,
   capFecha: 5, capAsistentes: 6, responsable: 7, evidencia: 8,
   observacion: 9, actualizadoPor: 10, actualizadoEn: 11,
   nombrePlan: 12, fuente: 13,
+  procedencia: 14, capacitado: 15, forma: 16, parroquia: 17, ordenPlan: 18, orden: 19,
 };
 // Ultima columna de la hoja, en letra. Se calcula para que anadir un campo mas
 // no obligue a buscar todos los 'A2:L' del modulo, que es como se olvida uno.
@@ -89,12 +113,85 @@ const numero = (v) => {
 };
 const pct = (parte, total) => (total > 0
   ? Math.round((parte / total) * 1000) / 10 : 0);
+// "50,0 %", como lo escribe el informe.
+const pctTexto = (p) => `${(Math.round(p * 10) / 10).toFixed(1).replace('.', ',')} %`;
+const siNoTexto = (b) => (b ? 'Sí' : 'No');
+const esSi = (v) => ['si', 'sí', 'true', '1', 'x'].includes(bajo(v));
+// Para cotejar nombres de grupo sin que una tilde o un espacio los separe.
+const claveNombre = (v) => (v == null ? '' : v).toString()
+  .normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .trim().toLowerCase().replace(/\s+/g, ' ');
+const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio',
+  'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+/** La fecha de hoy en Ecuador (UTC-5), en letras: "28 de septiembre de 2026". */
+const fechaEnLetras = (d = new Date()) => {
+  const ec = new Date(d.getTime() - 5 * 3600 * 1000);
+  return `${ec.getUTCDate()} de ${MESES[ec.getUTCMonth()]} de ${ec.getUTCFullYear()}`;
+};
+const fechaEcuador = (d = new Date()) => new Date(d.getTime() - 5 * 3600 * 1000)
+  .toISOString().slice(0, 10);
+const CORREO_VALIDO = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
 
 /**
- * LA REGLA. Un grupo cuenta como digitalizado cuando los tres cimientos estan
- * puestos EN LA APP y con datos reales. No es la escalera completa de nueve
- * hitos (eso mide profundidad): es el minimo para poder decir que el grupo dejo
- * el cuaderno.
+ * Los datos fijos del proyecto, tal como constan en la seccion 1 del informe
+ * del indicador. No salen de la hoja: son del proyecto aprobado y del sistema
+ * del INCYT, y se escriben una vez aqui para que el archivo que baja la
+ * plataforma y el documento firmado digan lo mismo.
+ */
+const PROYECTO = {
+  nombre: 'Digitalización básica y sensibilización comunitaria de cajas y/o grupos de ahorro '
+    + 'ubicados en la zona urbana de la ciudad de Salinas, provincia de Santa Elena',
+  directora: 'Ing. Sabina Villón Perero, Msc.',
+  plazo: '48 meses, de mayo de 2023 al 31 de mayo de 2027 (cuarto año en curso)',
+  componente: 'C4. Implementar el plan de digitalización básica de acuerdo con las necesidades '
+    + 'tecnológicas y evaluar su impacto',
+  actividad: 'C4A1. Implementación de los programas dispuestos en el plan de digitalización',
+  indicador: 'IN-DIBA-2026-1.2. Porcentaje de las CAYC seleccionadas que están digitalizadas',
+  periodo: 'Segundo cuatrimestre de 2026',
+  medio: 'Instrumento de seguimiento de los objetivos del plan',
+};
+
+/**
+ * EL CRITERIO DEL INFORME. Se considera digitalizado el grupo que esta en la
+ * plataforma con la nomina de sus integrantes. Los cuatro primeros hitos
+ * llevan al grupo hasta su digitalizacion y los tres siguientes miden el uso.
+ */
+const CRITERIO = 'Se considera digitalizado el grupo de ahorro que está registrado en la '
+  + 'plataforma JuntaGO! (juntago.com) con la nómina de sus integrantes. El seguimiento '
+  + 'distingue siete hitos: los cuatro primeros llevan al grupo hasta su digitalización y '
+  + 'los tres siguientes miden el uso de la herramienta.';
+const HITOS = [
+  { clave: 'socializado', nombre: 'Socializado',
+    verifica: 'El grupo recibió la socialización del proyecto y conoció la herramienta' },
+  { clave: 'capacitado', nombre: 'Capacitado',
+    verifica: 'Recibió capacitación presencial o por videoconferencia' },
+  { clave: 'nomina', nombre: 'Nómina levantada',
+    verifica: 'Entregó la nómina de sus integrantes con su directiva' },
+  { clave: 'incorporado', nombre: 'Incorporado',
+    verifica: 'El grupo existe en la plataforma con sus socias enlazadas' },
+  { clave: 'directiva', nombre: 'Con directiva',
+    verifica: 'Tiene registradas una cabeza (presidencia o liderazgo) y una tesorería' },
+  { clave: 'movimiento', nombre: 'Con movimiento propio',
+    verifica: 'Registró al menos un aporte, acción o préstamo propio en la plataforma' },
+  { clave: 'uso', nombre: 'En uso por sus socias',
+    verifica: 'Además, la mitad de sus socias ha ingresado alguna vez a la plataforma' },
+];
+/** Cada nivel incluye al anterior. La meta se mide en el primero. */
+const NIVELES = [
+  { clave: 'incorporado', nombre: '1. Incorporado',
+    exige: 'El grupo existe en la plataforma con su nómina de socias' },
+  { clave: 'directiva', nombre: '2. Con directiva',
+    exige: 'Además tiene registrada una cabeza (presidencia o liderazgo) y una tesorería' },
+  { clave: 'movimiento', nombre: '3. Con movimiento propio',
+    exige: 'Además registró al menos un movimiento propio en la plataforma' },
+  { clave: 'uso', nombre: '4. En uso por sus socias',
+    exige: 'Además la mitad de sus socias ha ingresado alguna vez' },
+];
+
+/**
+ * Las tres condiciones que antes definian "digitalizada" y que ahora son el
+ * NIVEL 4 (directiva + dinero + uso). Se conservan con sus textos porque son
+ * lo que se le dice a cada grupo que le falta para llegar al uso pleno.
  */
 const CONDICIONES = [
   {
@@ -117,6 +214,9 @@ const CONDICIONES = [
 module.exports.HOJA_CAMPO = HOJA_CAMPO;
 module.exports.CABECERA_CAMPO = CABECERA_CAMPO;
 module.exports.CONDICIONES = CONDICIONES;
+module.exports.HITOS = HITOS;
+module.exports.NIVELES = NIVELES;
+module.exports.PROYECTO = PROYECTO;
 
 module.exports.register = function register(app, ctx) {
   const {
@@ -169,6 +269,26 @@ module.exports.register = function register(app, ctx) {
     }
   }
 
+  /**
+   * Una pestana creada con la cabecera vieja (14 columnas) no se entera sola de
+   * las columnas nuevas: ensureSheetExists solo crea, nunca amplia. Los datos se
+   * leen por posicion y funcionarian igual, pero quien abra la hoja veria
+   * columnas sin titulo. Solo se amplia si lo que hay es un PREFIJO exacto de la
+   * cabecera actual: si alguien la cambio a mano, no se pisa.
+   */
+  async function completarCabecera(sheetsClient) {
+    const [actual = []] = await leer(sheetsClient, `${HOJA_CAMPO}!A1:${COL_FIN}1`);
+    if (actual.length >= CABECERA_CAMPO.length) return;
+    const esPrefijo = actual.every((c, i) => (c || '').toString().trim() === CABECERA_CAMPO[i]);
+    if (!esPrefijo) return;
+    await sheetsClient.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${HOJA_CAMPO}!A1:${COL_FIN}1`,
+      valueInputOption: 'RAW',
+      resource: { values: [CABECERA_CAMPO] },
+    });
+  }
+
   // =========================================================================
   // La ficha de campo: que grupos son del proyecto, y que se hizo con cada uno
   // =========================================================================
@@ -194,6 +314,12 @@ module.exports.register = function register(app, ctx) {
         observacion: (f[CAMPO.observacion] || '').toString(),
         nombreEnElPlan: (f[CAMPO.nombrePlan] || '').toString(),
         fuenteDeLaSeleccion: (f[CAMPO.fuente] || '').toString(),
+        procedencia: (f[CAMPO.procedencia] || '').toString(),
+        capacitado: esSi(f[CAMPO.capacitado]),
+        formaDeIncorporacion: (f[CAMPO.forma] || '').toString(),
+        parroquia: (f[CAMPO.parroquia] || '').toString(),
+        ordenEnElPlan: numero(f[CAMPO.ordenPlan]) || null,
+        orden: numero(f[CAMPO.orden]) || null,
         actualizado: dia(f[CAMPO.actualizadoEn]),
       }));
 
@@ -227,6 +353,7 @@ module.exports.register = function register(app, ctx) {
       try {
         const sheetsClient = await getSheetsClient();
         await asegurarCampo(sheetsClient);
+        await completarCabecera(sheetsClient);
         const filas = await leer(sheetsClient, `${HOJA_CAMPO}!A2:${COL_FIN}`);
         const posicion = new Map();
         filas.forEach((f, i) => {
@@ -270,6 +397,14 @@ module.exports.register = function register(app, ctx) {
             ahora,
             tomar(e.nombreEnElPlan ?? e.NombreEnElPlan, CAMPO.nombrePlan, 200),
             tomar(e.fuenteDeLaSeleccion ?? e.FuenteDeLaSeleccion, CAMPO.fuente, 300),
+            tomar(e.procedencia ?? e.Procedencia, CAMPO.procedencia, 120),
+            (e.capacitado ?? e.Capacitado) === undefined
+              ? (anterior[CAMPO.capacitado] || '')
+              : ((e.capacitado ?? e.Capacitado) === true || esSi(e.capacitado ?? e.Capacitado) ? 'si' : 'no'),
+            tomar(e.formaDeIncorporacion ?? e.FormaDeIncorporacion, CAMPO.forma, 120),
+            tomar(e.parroquia ?? e.Parroquia, CAMPO.parroquia, 120),
+            tomar(e.ordenEnElPlan ?? e.OrdenEnElPlan, CAMPO.ordenPlan, 10),
+            tomar(e.orden ?? e.Orden, CAMPO.orden, 10),
           ];
           if (posicion.has(gid)) cambios.push({ fila: posicion.get(gid), valores: fila });
           else nuevas.push(fila);
@@ -510,22 +645,54 @@ module.exports.register = function register(app, ctx) {
         .filter((f) => normalizeGroupKey(f[col]) === gid);
 
       // --- la ficha de campo ----------------------------------------------
-      const fichaDe = new Map();
-      campo.forEach((f) => {
-        const gid = normalizeGroupKey(f[CAMPO.id]);
-        if (gid && !fichaDe.has(gid)) fichaDe.set(gid, f);
-      });
-
       const nombreGrupo = new Map();
       grupos.forEach((g) => {
         const gid = normalizeGroupKey(g[GRP.id]);
         if (gid) nombreGrupo.set(gid, (g[GRP.nombre] || '').toString());
       });
 
-      // El denominador: los grupos marcados como CAYC en la ficha de campo.
+      // Un grupo del registro que aun no estaba en la app se anota por su
+      // NOMBRE ("sinapp:..."). Cuando despues se carga su nomina, el grupo
+      // aparece con un identificador nuevo que nadie va a volver a copiar en la
+      // ficha. Sin este paso seguiria contando como "no esta en la app" para
+      // siempre. Se enlaza por nombre SOLO si hay un unico grupo vivo con ese
+      // nombre y ese grupo no tiene ya su propia fila en la ficha.
+      const vivosPorNombre = new Map();
+      const nombresRepetidos = new Set();
+      grupos
+        .filter((g) => g[GRP.id] && bajo(g[GRP.estado]) !== 'eliminado')
+        .forEach((g) => {
+          const k = claveNombre(g[GRP.nombre]);
+          if (!k) return;
+          if (vivosPorNombre.has(k)) nombresRepetidos.add(k);
+          else vivosPorNombre.set(k, normalizeGroupKey(g[GRP.id]));
+        });
+      const conId = new Set(campo.map((f) => normalizeGroupKey(f[CAMPO.id]))
+        .filter((gid) => gid && !gid.startsWith('sinapp:')));
+      const fichaDe = new Map();
+      const enlazadosPorNombre = [];
+      campo.forEach((f) => {
+        let gid = normalizeGroupKey(f[CAMPO.id]);
+        if (!gid) return;
+        if (gid.startsWith('sinapp:')) {
+          const k = claveNombre((f[CAMPO.grupo] || '').toString() || gid.slice(7));
+          const enApp = vivosPorNombre.get(k);
+          if (enApp && !nombresRepetidos.has(k) && !conId.has(enApp)) {
+            enlazadosPorNombre.push({ ficha: gid, grupo: enApp });
+            gid = enApp;
+          }
+        }
+        if (!fichaDe.has(gid)) fichaDe.set(gid, f);
+      });
+
+      // El denominador: los grupos marcados como CAYC en la ficha de campo, en
+      // el orden del registro que certifica la direccion.
+      const ordenDe = (gid) => numero((fichaDe.get(gid) || [])[CAMPO.orden]) || Infinity;
       const caycIds = [...fichaDe.entries()]
         .filter(([, f]) => bajo(f[CAMPO.esCayc]) !== 'no')
-        .map(([gid]) => gid);
+        .map(([gid]) => gid)
+        .sort((a, b) => (ordenDe(a) - ordenDe(b))
+          || claveNombre(nombreGrupo.get(a) || a).localeCompare(claveNombre(nombreGrupo.get(b) || b)));
 
       // Cuantos de ellos NO dicen de donde sale que son del proyecto. Sin esto,
       // el denominador es una lista que alguien escribio y hay que creersela;
@@ -541,6 +708,7 @@ module.exports.register = function register(app, ctx) {
       const filasGrupos = [];
       const filasNomina = [];
       const filasEvidencias = [];
+      const niveles = [];
 
       for (const gid of caycIds) {
         const ficha = fichaDe.get(gid) || [];
@@ -576,22 +744,47 @@ module.exports.register = function register(app, ctx) {
           usan: usanMedible ? (socias.length > 0 && entraron.length * 2 >= socias.length) : null,
           dinero: (susAhorros.length + susAcciones.length + susPrestamos.length) > 0,
         };
-        // Tres estados, no dos: si, no, y sin medir. Un grupo con alguna
-        // condicion sin medir NO cuenta como digitalizado (no se puede afirmar)
-        // pero tampoco se le apunta como fallo.
-        const hayIndeterminada = CONDICIONES.some((c) => cumple[c.clave] === null);
-        const digitalizada = enLaApp && !hayIndeterminada
-          && CONDICIONES.every((c) => cumple[c.clave] === true);
-        const veredicto = !enLaApp ? 'no'
-          : (hayIndeterminada && CONDICIONES.every((c) => cumple[c.clave] !== false)
-            ? 'sin medir'
-            : siNo(digitalizada));
-        const leFalta = enLaApp
-          ? CONDICIONES.filter((c) => cumple[c.clave] === false).map((c) => c.titulo)
-            .concat(CONDICIONES.filter((c) => cumple[c.clave] === null)
-              .map((c) => `${c.titulo} (SIN MEDIR: el registro de entradas empieza el `
-                + `${ventana.desde || 'sin datos'} y estas socias estaban desde antes)`))
-          : ['El grupo todavia no existe en la app'];
+
+        // --- los siete hitos del informe ----------------------------------
+        // La forma de incorporacion es el hito "Nomina levantada". Si la
+        // direccion no la anoto, el grupo NO cuenta como incorporado aunque
+        // tenga cuentas enlazadas: un valor que falta no puede producir un si.
+        const forma = (ficha[CAMPO.forma] || '').toString().trim();
+        const hito = {
+          // Estar en el registro de la direccion ES haber sido socializado:
+          // es la relacion de grupos socializados que ella certifica.
+          socializado: true,
+          capacitado: esSi(ficha[CAMPO.capacitado]) || !!dia(ficha[CAMPO.capFecha]),
+          nomina: !!forma,
+          incorporado: enLaApp && socias.length > 0 && !!forma,
+          directiva: cumple.directiva,
+          movimiento: cumple.dinero,
+          uso: cumple.usan,
+        };
+        // Los niveles son acumulativos: cada uno exige los anteriores. El
+        // cuarto es la regla que este modulo usaba antes como "digitalizada",
+        // con sus tres estados (si, no, sin medir).
+        const nivel = { incorporado: hito.incorporado };
+        nivel.directiva = nivel.incorporado && hito.directiva;
+        nivel.movimiento = nivel.directiva && hito.movimiento;
+        nivel.uso = !nivel.movimiento ? false : hito.uso;
+        const veredictoUso = nivel.uso === null ? 'sin medir' : siNo(nivel.uso);
+
+        const leFalta = [];
+        if (!enLaApp) {
+          leFalta.push('El grupo todavia no existe en la app');
+        } else {
+          if (!forma) {
+            leFalta.push('Nomina levantada: la direccion no ha anotado como se incorporo '
+              + 'el grupo (columna FormaDeIncorporacion de SeguimientoCampo)');
+          }
+          if (socias.length === 0) leFalta.push('El grupo no tiene socias enlazadas');
+          CONDICIONES.filter((c) => cumple[c.clave] === false)
+            .forEach((c) => leFalta.push(c.titulo));
+          CONDICIONES.filter((c) => cumple[c.clave] === null)
+            .forEach((c) => leFalta.push(`${c.titulo} (SIN MEDIR: el registro de entradas empieza el `
+              + `${ventana.desde || 'sin datos'} y estas socias estaban desde antes)`));
+        }
 
         filasGrupos.push({
           GrupoID: enLaApp ? gid : '(no esta en la app)',
@@ -604,15 +797,24 @@ module.exports.register = function register(app, ctx) {
           'Socializacion (asistentes)': numero(ficha[CAMPO.socAsistentes]),
           'Capacitacion (fecha)': dia(ficha[CAMPO.capFecha]),
           'Capacitacion (asistentes)': numero(ficha[CAMPO.capAsistentes]),
+          Capacitado: siNo(hito.capacitado),
+          'Forma de incorporacion': forma,
+          Procedencia: (ficha[CAMPO.procedencia] || '').toString(),
           'Socias que han entrado': entraron.length,
           '% de socias que han entrado': pct(entraron.length, socias.length),
+          'Entradas de sus socias': socias
+            .reduce((s, x) => s + (entradasDe.get(x.correo) || []).length, 0),
           'Aportes registrados': susAhorros.length,
           'Compras de acciones': susAcciones.length,
           'Prestamos otorgados': susPrestamos.length,
           'Pagos con comprobante': susPagos.length,
           'Asambleas registradas': susAsambleas.length,
           'Uso medible': siNo(usanMedible),
-          'DIGITALIZADA': veredicto,
+          // DIGITALIZADA es el criterio del informe: nivel 1, incorporado.
+          'DIGITALIZADA': siNo(nivel.incorporado),
+          'Nivel 2: con directiva': siNo(nivel.directiva),
+          'Nivel 3: con movimiento propio': siNo(nivel.movimiento),
+          'Nivel 4: en uso por sus socias': veredictoUso,
           'Que le falta': leFalta.join('; '),
           Responsable: (ficha[CAMPO.responsable] || '').toString(),
           Evidencia: (ficha[CAMPO.evidencia] || '').toString(),
@@ -622,6 +824,24 @@ module.exports.register = function register(app, ctx) {
           // que alguien renombre grupos en la app para que cuadre el informe.
           'Nombre en el Plan': (ficha[CAMPO.nombrePlan] || '').toString(),
           'Fuente de la seleccion': (ficha[CAMPO.fuente] || '').toString(),
+          Parroquia: (ficha[CAMPO.parroquia] || '').toString(),
+          'Orden en el Plan': numero(ficha[CAMPO.ordenPlan]) || '',
+        });
+        // Lo que necesitan las hojas del informe, sin volver a calcularlo. El
+        // nombre que se imprime es el del registro que certifica la direccion;
+        // si no lo trae, el de la app.
+        niveles.push({
+          gid,
+          nivel,
+          hito,
+          fila: filasGrupos[filasGrupos.length - 1],
+          nombreDoc: (ficha[CAMPO.grupo] || '').toString().trim() || nombreGrupo.get(gid) || gid,
+          procedencia: (ficha[CAMPO.procedencia] || '').toString().trim(),
+          parroquia: (ficha[CAMPO.parroquia] || '').toString().trim(),
+          nombreEnElPlan: (ficha[CAMPO.nombrePlan] || '').toString().trim(),
+          ordenEnElPlan: numero(ficha[CAMPO.ordenPlan]) || 0,
+          correos: socias.map((s) => s.correo),
+          veredictoUso,
         });
 
         const orden = { presidente: 0, tesorero: 1, secretario: 2, member: 3 };
@@ -681,16 +901,33 @@ module.exports.register = function register(app, ctx) {
       filasEvidencias.sort((a, b) => String(a.Fecha).localeCompare(String(b.Fecha)));
 
       // --- el indicador ----------------------------------------------------
+      // El criterio del informe: digitalizado = nivel 1, incorporado. No
+      // depende del registro de entradas, asi que se puede afirmar aunque el uso
+      // (nivel 4) quede sin medir.
       const denominador = caycIds.length;
-      const numerador = filasGrupos.filter((g) => g.DIGITALIZADA === 'si').length;
-      const sinMedir = filasGrupos.filter((g) => g.DIGITALIZADA === 'sin medir').length;
+      const numerador = niveles.filter((x) => x.nivel.incorporado).length;
       const porcentaje = pct(numerador, denominador);
       const META = 50;
-      // Si hay grupos que no se pueden evaluar, el porcentaje NO es el indicador:
-      // es una cota inferior. Decir "0 %" cuando lo que pasa es que falta el dato
-      // convierte un hueco de instrumentacion en un juicio sobre las socias.
-      //
-      // Y sin denominador no hay indicador en absoluto: mientras nadie marque en
+      // Los cuatro niveles, cada uno sobre el mismo denominador. En el cuarto un
+      // grupo puede quedar "sin medir": entonces su resultado es un intervalo,
+      // de lo afirmado a lo afirmado mas lo que falta por medir. Decir "0 %"
+      // cuando lo que pasa es que falta el dato convierte un hueco de
+      // instrumentacion en un juicio sobre las socias.
+      const resumenNiveles = NIVELES.map((n) => {
+        const si = niveles.filter((x) => x.nivel[n.clave] === true).length;
+        const sinMedirN = niveles.filter((x) => x.nivel[n.clave] === null).length;
+        return {
+          clave: n.clave,
+          nombre: n.nombre,
+          exige: n.exige,
+          grupos: si,
+          sinMedir: sinMedirN,
+          porcentaje: pct(si, denominador),
+          porcentajeMaximo: pct(si + sinMedirN, denominador),
+        };
+      });
+      const sinMedir = resumenNiveles.find((n) => n.clave === 'uso').sinMedir;
+      // Sin denominador no hay indicador en absoluto: mientras nadie marque en
       // SeguimientoCampo que grupos son CAYC, 0 de 0 no es "no cumple la meta",
       // es "todavia no se ha decidido que se mide".
       const hayDenominador = denominador > 0;
@@ -699,10 +936,14 @@ module.exports.register = function register(app, ctx) {
       // que la ventana de registro parezca cubrir mas de un ano y la condicion de
       // uso pase a parecer comprobada. Es el mismo camino por el que estuve a
       // punto de reportar un cero falso, solo que por la otra puerta.
-      const medible = hayDenominador && sinMedir === 0 && !incluirDemo;
+      const medible = hayDenominador && !incluirDemo;
+      // El USO (nivel 4) es lo unico que depende del registro de entradas. Se
+      // puede afirmar solo si ese registro es fiable, cubre a todos los grupos y
+      // no lleva nada sembrado dentro.
+      const usoMedible = medible && ventana.fiable && sinMedir === 0;
 
-      const socializados = filasGrupos.filter((g) => g['Socializacion (fecha)']).length;
-      const capacitados = filasGrupos.filter((g) => g['Capacitacion (fecha)']).length;
+      const socializados = filasGrupos.length;
+      const capacitados = filasGrupos.filter((g) => g.Capacitado === 'si').length;
       const usando = filasGrupos.filter((g) => Number(g['Socias que han entrado']) > 0).length;
       const sinApp = filasGrupos.filter((g) => g['Esta en la app'] === 'no').length;
 
@@ -766,17 +1007,37 @@ module.exports.register = function register(app, ctx) {
                + 'algo que no lo es. Todos los grupos salen como "sin medir" en esa condicion.',
         });
       }
-      // Solo cuando de verdad hay grupos sin evaluar. Colgarlo de `!medible` lo
-      // disparaba tambien con los datos sembrados dentro, y entonces anunciaba
-      // "0 de 10 grupos no se pueden evaluar", que no significa nada.
+      // Solo cuando de verdad hay grupos sin evaluar en el nivel 4. Ya no es
+      // grave: el indicador se mide en el nivel 1, que no depende del registro
+      // de entradas. Lo que no se puede afirmar es el USO, y eso se dice.
       if (sinMedir > 0 && hayDenominador) {
-        graves.push({
-          Concepto: 'ATENCION: el indicador NO se puede afirmar todavia',
-          Valor: `${sinMedir} de ${denominador} grupos no se pueden evaluar porque el registro `
-               + `de entradas a la app empieza el ${ventana.desde || 'sin datos'} y sus socias `
-               + 'estaban dadas de alta desde antes. Lo que hicieran antes de esa fecha no quedo '
-               + 'anotado en ninguna parte, asi que no es un cero: es un dato que falta. '
-               + 'El porcentaje de abajo es una COTA INFERIOR, no la medicion.',
+        avisos.push({
+          Concepto: 'Aviso: el nivel 4 (uso) no se puede afirmar para todos los grupos',
+          Valor: `${sinMedir} de ${denominador} grupos no se pueden evaluar en el uso porque el `
+               + `registro de entradas a la app empieza el ${ventana.desde || 'sin datos'} y sus `
+               + 'socias estaban dadas de alta desde antes. Lo que hicieran antes de esa fecha no '
+               + 'quedo anotado en ninguna parte, asi que no es un cero: es un dato que falta. '
+               + 'Por eso el nivel 4 se publica como intervalo.',
+        });
+      }
+      // Un grupo con cuentas enlazadas pero sin la nomina anotada NO cuenta. Se
+      // dice cuales son, para que no parezca un olvido del programa.
+      const sinForma = filasGrupos
+        .filter((g) => g['Esta en la app'] === 'si' && !g['Forma de incorporacion']);
+      if (sinForma.length > 0) {
+        avisos.push({
+          Concepto: 'Aviso: grupos en la app sin nomina anotada',
+          Valor: `${sinForma.map((g) => g.Grupo).join(', ')} ${sinForma.length === 1 ? 'esta' : 'estan'} `
+               + 'en la plataforma pero la direccion no ha anotado como entro su nomina (columna '
+               + 'FormaDeIncorporacion). Sin ese dato no cuentan como digitalizados.',
+        });
+      }
+      if (enlazadosPorNombre.length > 0) {
+        avisos.push({
+          Concepto: 'Aviso: grupos del registro enlazados por su nombre',
+          Valor: `${enlazadosPorNombre.length} grupo(s) se anotaron en la ficha antes de existir en `
+               + 'la app y se enlazaron con el grupo que hoy lleva el mismo nombre: '
+               + `${enlazadosPorNombre.map((x) => nombreGrupo.get(x.grupo) || x.grupo).join(', ')}.`,
         });
       }
 
@@ -839,25 +1100,53 @@ module.exports.register = function register(app, ctx) {
         });
       }
 
+      // --- lo que necesitan las secciones del informe ---------------------
+      const digitalizados = niveles.filter((x) => x.nivel.incorporado);
+      const textoNivel = (n) => (n.sinMedir > 0
+        ? { grupos: `${n.grupos} a ${n.grupos + n.sinMedir}`,
+          indicador: `${pctTexto(n.porcentaje)} a ${pctTexto(n.porcentajeMaximo)}` }
+        : { grupos: n.grupos, indicador: pctTexto(n.porcentaje) });
+      const resultadoTexto = hayDenominador
+        ? `(${numerador} / ${denominador}) × 100 = ${pctTexto(porcentaje)}`
+        : 'sin denominador: falta marcar las CAYC en SeguimientoCampo';
+      const cumplimiento = !hayDenominador ? 'Sin denominador'
+        : (incluirDemo ? 'No se afirma: el documento incluye datos de demostración'
+          : (porcentaje >= META ? 'Meta alcanzada' : 'Meta no alcanzada'));
+      const suma = (lista, clave) => lista.reduce((s, x) => s + Number(x.fila[clave] || 0), 0);
+      const integrantes = new Set(digitalizados.flatMap((x) => x.correos).filter(Boolean));
+      const entradasSocias = suma(digitalizados, 'Entradas de sus socias');
+      const operaciones = {
+        ahorros: suma(digitalizados, 'Aportes registrados'),
+        acciones: suma(digitalizados, 'Compras de acciones'),
+        prestamos: suma(digitalizados, 'Prestamos otorgados'),
+      };
+      operaciones.total = operaciones.ahorros + operaciones.acciones + operaciones.prestamos;
+      const conMovimiento = digitalizados.filter((x) => x.hito.movimiento);
+      const conMitad = digitalizados.filter((x) => x.hito.uso === true);
+      const delPlan = niveles.filter((x) => x.ordenEnElPlan > 0)
+        .sort((a, b) => a.ordenEnElPlan - b.ordenEnElPlan);
+      const procedenciaPlan = niveles.filter((x) => /plan/i.test(x.procedencia)).length;
+
       const filasIndicador = [
         ...graves,
         ...avisos,
         { Concepto: 'Indicador', Valor: 'IN-DIBA-2026-1.2' },
         { Concepto: 'Meta', Valor: 'Porcentaje de las CAYC seleccionadas estan digitalizadas' },
         { Concepto: 'Meta cuantitativa', Valor: `${META} %` },
+        { Concepto: 'Criterio de digitalizacion', Valor: CRITERIO },
         { Concepto: 'NUMERADOR (grupos CAYC digitalizados)', Valor: numerador },
-        { Concepto: 'DENOMINADOR (total de grupos CAYC)', Valor: denominador },
-        { Concepto: 'Grupos que NO se pueden evaluar', Valor: sinMedir },
+        { Concepto: 'DENOMINADOR (grupos socializados)', Valor: denominador },
         {
           Concepto: 'Denominador con su fuente documentada',
           Valor: `${denominador - caycSinFuente.length} de ${denominador}`,
         },
-        {
-          Concepto: 'RESULTADO',
-          Valor: !hayDenominador ? 'sin denominador: falta marcar las CAYC en SeguimientoCampo'
-            : (medible ? `${porcentaje} %` : `${porcentaje} % o mas (sin medir)`),
-        },
+        { Concepto: 'RESULTADO', Valor: resultadoTexto },
         { Concepto: 'Cumple la meta', Valor: medible ? siNo(porcentaje >= META) : 'sin medir' },
+        ...resumenNiveles.slice(1).map((n) => ({
+          Concepto: `Nivel ${n.nombre}`,
+          Valor: `${textoNivel(n).grupos} de ${denominador} (${textoNivel(n).indicador})`,
+        })),
+        { Concepto: 'Grupos sin medir en el nivel 4 (uso)', Valor: sinMedir },
         ...(medible ? [{
           Concepto: 'Brecha hasta la meta',
           Valor: porcentaje >= META ? '0' : `${Math.round((META - porcentaje) * 10) / 10} %`,
@@ -888,16 +1177,239 @@ module.exports.register = function register(app, ctx) {
         },
         { Concepto: 'Vinculos socia-grupo (una socia en dos cajas cuenta dos veces)', Valor: filasNomina.length },
         { Concepto: 'Registros de operaciones como evidencia', Valor: filasEvidencias.length },
-        { Concepto: 'Fecha del corte', Valor: new Date().toISOString().slice(0, 10) },
+        {
+          Concepto: 'Listado inicial del Plan: digitalizados',
+          Valor: `${delPlan.filter((x) => x.nivel.incorporado).length} de ${delPlan.length}`
+            + (delPlan.some((x) => x.nivel.incorporado)
+              ? ` (${delPlan.filter((x) => x.nivel.incorporado).map((x) => x.nombreDoc).join(', ')})` : ''),
+        },
+        { Concepto: 'Fecha del corte', Valor: fechaEcuador() },
+      ];
+
+      // --- las secciones del informe, una hoja cada una ------------------
+      const filasDatos = [
+        { Campo: 'Proyecto de investigación', Valor: PROYECTO.nombre },
+        { Campo: 'Directora del proyecto', Valor: PROYECTO.directora },
+        { Campo: 'Plazo del proyecto', Valor: PROYECTO.plazo },
+        { Campo: 'Componente', Valor: PROYECTO.componente },
+        { Campo: 'Actividad', Valor: PROYECTO.actividad },
+        { Campo: 'Indicador', Valor: PROYECTO.indicador },
+        { Campo: 'Periodo', Valor: PROYECTO.periodo },
+        { Campo: 'Meta', Valor: `${META} % de las CAYC seleccionadas están digitalizadas` },
+        { Campo: 'Medio de verificación', Valor: PROYECTO.medio },
+        { Campo: 'Corte de la información', Valor: fechaEnLetras() },
+      ];
+
+      const filasCriterio = HITOS.map((h, i) => ({
+        HITO: i + 1, NOMBRE: h.nombre, 'QUÉ SE VERIFICA': h.verifica,
+      }));
+
+      const filasResultado = [
+        { Concepto: 'Grupos de ahorro socializados', Valor: denominador },
+        { Concepto: 'Grupos de ahorro capacitados', Valor: capacitados },
+        { Concepto: 'Grupos de ahorro digitalizados', Valor: numerador },
+        { Concepto: 'Resultado del indicador', Valor: resultadoTexto },
+        { Concepto: 'Meta del cuatrimestre', Valor: `${META} %` },
+        { Concepto: 'Cumplimiento', Valor: cumplimiento },
+      ];
+
+      const filasNiveles = resumenNiveles.map((n) => ({
+        NIVEL: n.nombre,
+        'QUÉ EXIGE': n.exige,
+        GRUPOS: textoNivel(n).grupos,
+        INDICADOR: textoNivel(n).indicador,
+      }));
+
+      const filasDigitalizados = digitalizados.map((x, i) => ({
+        'N.º': i + 1,
+        'GRUPO DE AHORRO': x.nombreDoc,
+        SOCIOS: Number(x.fila['Socias en la app'] || 0),
+        'DIRECTIVA REGISTRADA': siNoTexto(x.hito.directiva),
+        'FORMA DE INCORPORACIÓN': x.fila['Forma de incorporacion'],
+      }));
+      if (filasDigitalizados.length) {
+        filasDigitalizados.push({
+          'N.º': '', 'GRUPO DE AHORRO': 'Total', SOCIOS: suma(digitalizados, 'Socias en la app'),
+          'DIRECTIVA REGISTRADA': '', 'FORMA DE INCORPORACIÓN': '',
+        });
+      }
+
+      const nombres = (lista) => lista.map((x) => x.nombreDoc).join(', ');
+      const filasCobertura = [
+        {
+          PREGUNTA: '¿A cuántos grupos se les hizo la socialización?',
+          RESPUESTA: denominador,
+          DETALLE: `Registro de la dirección del proyecto: ${procedenciaPlan} del listado inicial del `
+            + `Plan Integral y ${denominador - procedenciaPlan} identificados o conformados durante la `
+            + `ejecución. De ellos, ${numerador} están digitalizados`,
+        },
+        {
+          PREGUNTA: '¿Cuántos grupos fueron capacitados?',
+          RESPUESTA: capacitados,
+          DETALLE: 'Registro del equipo del proyecto anotado en la ficha de campo: capacitación '
+            + 'presencial o por videoconferencia en el uso de la plataforma',
+        },
+        {
+          PREGUNTA: '¿Cuántos grupos registran ya aportes propios en la plataforma?',
+          RESPUESTA: conMovimiento.length,
+          DETALLE: conMovimiento.length
+            ? `${nombres(conMovimiento)}: ${operaciones.ahorros} ahorros, ${operaciones.acciones} `
+              + `acciones y ${operaciones.prestamos} préstamos, ${operaciones.total} movimientos en total`
+            : 'Ningún grupo digitalizado ha registrado todavía un movimiento propio en la plataforma',
+        },
+        {
+          PREGUNTA: '¿Cuántas entradas a la plataforma registran las socias y socios?',
+          RESPUESTA: entradasSocias,
+          DETALLE: (ventana.desde
+            ? `Entradas de las socias y socios de los ${numerador} grupos digitalizados registradas `
+              + `por el sistema desde el ${ventana.desde} hasta el ${ventana.hasta}. `
+            : 'El registro de accesos todavía no tiene ninguna entrada real. ')
+            + `En ${conMitad.length} grupo(s) al menos la mitad de sus integrantes ha ingresado`
+            + (sinMedir > 0 ? `; en ${sinMedir} no se puede afirmar (el registro empezó después de su alta)` : ''),
+        },
+        {
+          PREGUNTA: '¿Cuántos grupos están digitalizados?',
+          RESPUESTA: numerador,
+          DETALLE: `Grupos creados en el sistema con su nómina de socias enlazada: el ${pctTexto(porcentaje)} `
+            + 'de los socializados',
+        },
+        {
+          PREGUNTA: '¿Cuántas socias y socios están organizados?',
+          RESPUESTA: integrantes.size,
+          DETALLE: `Integrantes enlazados a alguno de los ${numerador} grupos digitalizados`,
+        },
+        {
+          PREGUNTA: '¿Cuántas cuentas hay en la plataforma?',
+          RESPUESTA: persona.size,
+          DETALLE: 'Incluye las cuentas del equipo del proyecto y las abiertas para probar el sistema',
+        },
+      ];
+
+      const filasMatriz = digitalizados.map((x) => ({
+        'GRUPO DE AHORRO': x.nombreDoc,
+        SOCIOS: Number(x.fila['Socias en la app'] || 0),
+        INGRESOS: Number(x.fila['Entradas de sus socias'] || 0),
+        CAPACITADO: siNoTexto(x.hito.capacitado),
+        INCORPORADO: siNoTexto(x.nivel.incorporado),
+        DIRECTIVA: siNoTexto(x.hito.directiva),
+        MOVIMIENTO: siNoTexto(x.hito.movimiento),
+        'EN USO': x.veredictoUso === 'sin medir' ? 'Sin medir' : siNoTexto(x.veredictoUso === 'si'),
+      }));
+
+      const filasOperaciones = digitalizados.map((x) => ({
+        'GRUPO DE AHORRO': x.nombreDoc,
+        AHORROS: Number(x.fila['Aportes registrados'] || 0),
+        ACCIONES: Number(x.fila['Compras de acciones'] || 0),
+        'PRÉSTAMOS': Number(x.fila['Prestamos otorgados'] || 0),
+        TOTAL: Number(x.fila['Aportes registrados'] || 0) + Number(x.fila['Compras de acciones'] || 0)
+          + Number(x.fila['Prestamos otorgados'] || 0),
+      }));
+      if (filasOperaciones.length) {
+        filasOperaciones.push({
+          'GRUPO DE AHORRO': 'TOTAL', AHORROS: operaciones.ahorros, ACCIONES: operaciones.acciones,
+          'PRÉSTAMOS': operaciones.prestamos, TOTAL: operaciones.total,
+        });
+      }
+
+      const filasPlan = delPlan.map((x) => ({
+        'N.º': x.ordenEnElPlan,
+        'GRUPO DEL LISTADO': x.nombreEnElPlan || x.nombreDoc,
+        PARROQUIA: x.parroquia,
+        INCORPORADO: siNoTexto(x.nivel.incorporado),
+        'OBSERVACIÓN': x.nivel.incorporado
+          ? `Incorporado a la plataforma con ${Number(x.fila['Socias en la app'] || 0)} socias`
+          : 'N/A',
+      }));
+
+      const filasSocializados = niveles.map((x, i) => ({
+        'N.º': i + 1,
+        'GRUPO DE AHORRO': x.nombreDoc,
+        PROCEDENCIA: x.procedencia,
+        DIGITALIZADO: siNoTexto(x.nivel.incorporado),
+      }));
+
+      // --- control de consistencia: lo que un revisor comprobaria a mano ---
+      const gruposDe = new Map();
+      digitalizados.forEach((x) => x.correos.forEach((c) => {
+        if (!c) return;
+        if (!gruposDe.has(c)) gruposDe.set(c, []);
+        gruposDe.get(c).push(x.nombreDoc);
+      }));
+      const enDos = [...gruposDe.entries()].filter(([, l]) => l.length > 1);
+      const correosMalos = [...integrantes].filter((c) => !CORREO_VALIDO.test(c) || /\.$/.test(c));
+      const sinDirectiva = digitalizados.filter((x) => !x.hito.directiva);
+      const conforme = (ok) => (ok ? 'Conforme' : 'No conforme');
+      const filasConsistencia = [
+        {
+          'COMPROBACIÓN': 'La suma de socios por grupo coincide con el total de integrantes',
+          RESULTADO: conforme(suma(digitalizados, 'Socias en la app') === integrantes.size),
+          'OBSERVACIÓN': `${suma(digitalizados, 'Socias en la app')} enlaces para `
+            + `${integrantes.size} personas en ${numerador} grupos`,
+        },
+        {
+          'COMPROBACIÓN': 'Ninguna socia figura enlazada a dos grupos a la vez',
+          RESULTADO: conforme(enDos.length === 0),
+          'OBSERVACIÓN': enDos.length
+            ? enDos.map(([c, l]) => `${(persona.get(c) || {}).nombre || c}: ${l.join(' y ')}`).join('; ')
+            : 'cada integrante pertenece a un solo grupo digitalizado',
+        },
+        {
+          'COMPROBACIÓN': 'Cada grupo digitalizado tiene su directiva registrada',
+          RESULTADO: conforme(sinDirectiva.length === 0),
+          'OBSERVACIÓN': sinDirectiva.length
+            ? `sin cabeza y tesorería: ${nombres(sinDirectiva)}`
+            : `${numerador} de ${numerador} con cabeza y tesorería`,
+        },
+        {
+          'COMPROBACIÓN': 'Los correos de los socios tienen forma válida',
+          RESULTADO: conforme(correosMalos.length === 0),
+          'OBSERVACIÓN': correosMalos.length ? correosMalos.join(', ') : 'todos los correos tienen forma válida',
+        },
+        {
+          'COMPROBACIÓN': 'El porcentaje del indicador resulta de dividir su numerador por su denominador',
+          RESULTADO: conforme(hayDenominador),
+          'OBSERVACIÓN': hayDenominador ? `${numerador} entre ${denominador}: ${pctTexto(porcentaje)}` : 'sin denominador',
+        },
+        {
+          'COMPROBACIÓN': 'El cálculo usa solo datos reales',
+          RESULTADO: conforme(!incluirDemo),
+          'OBSERVACIÓN': incluirDemo
+            ? 'este archivo INCLUYE datos de demostración y no sirve como medio de verificación'
+            : `se dejaron fuera ${filasSembrado} filas sembradas para demostrar la app`,
+        },
+        {
+          'COMPROBACIÓN': 'Los grupos del registro que ya están en la plataforma se reconocen sin ambigüedad',
+          RESULTADO: conforme(campo.every((f) => {
+            const gid = normalizeGroupKey(f[CAMPO.id]);
+            if (!gid.startsWith('sinapp:')) return true;
+            return !nombresRepetidos.has(claveNombre((f[CAMPO.grupo] || '').toString() || gid.slice(7)));
+          })),
+          'OBSERVACIÓN': enlazadosPorNombre.length
+            ? `${enlazadosPorNombre.length} enlazado(s) por su nombre`
+            : 'todos los grupos del registro que están en la plataforma llevan su identificador',
+        },
       ];
 
       const filasRegla = [
-        { Punto: 'Denominador', Regla: 'Los grupos marcados como CAYC en la hoja SeguimientoCampo. No se adivina: lo fija la direccion del proyecto.' },
+        { Punto: 'Denominador', Regla: 'Los grupos del registro de grupos socializados que certifica la direccion (hoja SeguimientoCampo, EsCAYC = si). No se adivina: lo fija la direccion del proyecto.' },
+        { Punto: 'Criterio de digitalizacion', Regla: `${CRITERIO} La meta se mide en el nivel 1 (incorporado).` },
+        ...HITOS.map((h, i) => ({ Punto: `Hito ${i + 1}: ${h.nombre}`, Regla: h.verifica })),
+        ...NIVELES.map((n) => ({ Punto: `Nivel ${n.nombre}`, Regla: n.exige })),
+        {
+          Punto: 'Nomina levantada',
+          Regla: 'Consta cuando la direccion anota en la ficha como entro la nomina del grupo '
+            + '(FormaDeIncorporacion). Si falta, el grupo no cuenta como incorporado aunque tenga cuentas enlazadas.',
+        },
+        {
+          Punto: 'Capacitado',
+          Regla: 'Consta cuando la ficha trae la fecha de la capacitacion o la marca Capacitado = si '
+            + '(registro del equipo del proyecto).',
+        },
         ...CONDICIONES.map((c, i) => ({
-          Punto: `Condicion ${i + 1} para contar como digitalizada`,
+          Punto: `Condicion ${i + 1} del nivel 4`,
           Regla: `${c.titulo}. ${c.detalle}`,
         })),
-        { Punto: 'Se cumplen todas', Regla: 'Un grupo cuenta como digitalizado solo si cumple las tres. La hoja Grupos dice cual le falta a cada uno.' },
+        { Punto: 'Uso pleno (nivel 4): se cumplen las tres', Regla: 'Un grupo esta en uso pleno solo si cumple las tres. La hoja Grupos dice cual le falta a cada uno.' },
         {
           Punto: 'Cuando una condicion no se puede medir',
           Regla: 'El registro de entradas a la app no existe desde siempre: empieza el '
@@ -936,7 +1448,7 @@ module.exports.register = function register(app, ctx) {
       return res.json({
         success: true,
         generado: new Date().toISOString(),
-        archivo: `JuntaGO-instrumento-digitalizacion-${new Date().toISOString().slice(0, 10)}`
+        archivo: `JuntaGO-indicador-IN-DIBA-2026-1.2-${fechaEcuador()}`
           + (incluirDemo ? '-CON-DATOS-DE-DEMOSTRACION' : ''),
         soloDatosReales: !incluirDemo,
         indicador: {
@@ -946,12 +1458,34 @@ module.exports.register = function register(app, ctx) {
           meta: META,
           cumple: medible ? porcentaje >= META : null,
           medible,
+          usoMedible,
           sinMedir,
           caycSinFuenteDocumentada: caycSinFuente.length,
           ventanaDeRegistro: ventana,
+          criterio: CRITERIO,
+          socializados: denominador,
+          capacitados,
+          niveles: resumenNiveles,
+          integrantes: integrantes.size,
+          entradasDeSocias: entradasSocias,
+          operaciones,
+          cuentas: persona.size,
         },
+        // El orden es el del informe: primero la hoja que avisa, despues las
+        // secciones tal como las lee quien revisa, y al final el detalle.
         hojas: [
           { nombre: 'Indicador', filas: filasIndicador },
+          { nombre: 'Datos generales', filas: filasDatos },
+          { nombre: 'Criterio', filas: filasCriterio },
+          { nombre: 'Resultado', filas: filasResultado },
+          { nombre: 'Niveles', filas: filasNiveles },
+          { nombre: 'Grupos digitalizados', filas: filasDigitalizados },
+          { nombre: 'Cobertura', filas: filasCobertura },
+          { nombre: 'Matriz de seguimiento', filas: filasMatriz },
+          { nombre: 'Registro de operaciones', filas: filasOperaciones },
+          { nombre: 'Listado inicial del Plan', filas: filasPlan },
+          { nombre: 'Registro de socializados', filas: filasSocializados },
+          { nombre: 'Control de consistencia', filas: filasConsistencia },
           { nombre: 'Como se calcula', filas: filasRegla },
           { nombre: 'Grupos', filas: filasGrupos },
           { nombre: 'Nomina de socias', filas: filasNomina },
