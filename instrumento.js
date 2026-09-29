@@ -1121,6 +1121,7 @@ module.exports.register = function register(app, ctx) {
         prestamos: suma(digitalizados, 'Prestamos otorgados'),
       };
       operaciones.total = operaciones.ahorros + operaciones.acciones + operaciones.prestamos;
+      const filasDeUsuario = usuarios.filter((u) => normalizeEmailKey(u[USR.email])).length;
       const conMovimiento = digitalizados.filter((x) => x.hito.movimiento);
       const conMitad = digitalizados.filter((x) => x.hito.uso === true);
       const delPlan = niveles.filter((x) => x.ordenEnElPlan > 0)
@@ -1281,7 +1282,14 @@ module.exports.register = function register(app, ctx) {
         {
           PREGUNTA: '¿Cuántas cuentas hay en la plataforma?',
           RESPUESTA: persona.size,
-          DETALLE: 'Incluye las cuentas del equipo del proyecto y las abiertas para probar el sistema',
+          // Una cuenta es un correo con el que se entra. Si la hoja trae el
+          // mismo correo en dos filas, son dos registros y UNA cuenta: se
+          // publican las dos cifras para que cuadren con quien cuente filas.
+          DETALLE: 'Incluye las cuentas del equipo del proyecto y las abiertas para probar el sistema'
+            + (filasDeUsuario > persona.size
+              ? `. La hoja de usuarios tiene ${filasDeUsuario} registros: ${filasDeUsuario - persona.size} `
+                + 'repiten un correo que ya tiene cuenta'
+              : ''),
         },
       ];
 

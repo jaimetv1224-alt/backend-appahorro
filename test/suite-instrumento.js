@@ -577,4 +577,16 @@ module.exports = async function run() {
   t.eq('y el control de consistencia lo marca',
     (filasDe(r, 'Control de consistencia').find((x) => /sin ambigüedad/.test(x['COMPROBACIÓN'])) || {}).RESULTADO,
     'No conforme');
+
+  // Un correo repetido en la hoja de usuarios son dos registros y UNA cuenta
+  // (se entra con el correo). Se cuenta una vez y se dice cuantos repiten,
+  // para que cuadre con quien cuente filas sin contar a nadie dos veces.
+  const cuentasAntes = r.body.indicador.cuentas;
+  seedUser({ nombre: 'Registro repetido', email: 'banq3@ins7.test' });
+  hoja.invalidarTodo();
+  r = await get('/api/admin/instrumento-digitalizacion', e.tokens.admin);
+  const cuentas7 = filasDe(r, 'Cobertura').find((x) => /cuentas/.test(x.PREGUNTA)) || {};
+  t.eq('un correo repetido no suma una cuenta mas', r.body.indicador.cuentas, cuentasAntes);
+  t.check('pero se declara el registro repetido', /1 repiten un correo/.test(String(cuentas7.DETALLE)),
+    String(cuentas7.DETALLE));
 };
